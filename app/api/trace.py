@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from app.db import Database
 from app.models import TraceEvent
+from app.trace import redact_trace_payload
 
 router = APIRouter(tags=["trace"])
 
@@ -27,8 +28,10 @@ def rider_trace(rider_id: str, request: Request) -> list[dict[str, object]]:
             "at": _iso(event.created_at),
             "type": event.event_type,
             "name": event.name,
-            "input": event.input_payload,
-            "output": _output(event.output_payload),
+            "input": redact_trace_payload(event.input_payload, rider_id=event.rider_id),
+            "output": _output(
+                redact_trace_payload(event.output_payload, rider_id=event.rider_id)
+            ),
         }
         for event in events
     ]

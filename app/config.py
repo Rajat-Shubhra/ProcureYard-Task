@@ -53,7 +53,7 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://quickdrop:quickdrop_dev@postgres:5432/quickdrop"
 
-    llm_provider: Literal["groq", "fake"] = "groq"
+    llm_provider: Literal["auto", "groq", "fake"] = "groq"
     groq_api_key: SecretStr | None = None
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_model: str = "openai/gpt-oss-20b"
@@ -94,12 +94,24 @@ class Settings(BaseSettings):
         validation_alias="ACTIVE_WORKER_HEARTBEAT_TTL_SECONDS",
     )
 
+    @property
+    def has_groq_api_key(self) -> bool:
+        return bool(self.groq_api_key and self.groq_api_key.get_secret_value().strip())
+
+    @property
+    def effective_llm_provider(self) -> Literal["groq", "fake"]:
+        if self.llm_provider == "groq":
+            return "groq"
+        if self.llm_provider == "auto" and self.has_groq_api_key:
+            return "groq"
+        return "fake"
+
     def validate_api_runtime(self) -> None:
         """Fail startup when the selected production adapter lacks credentials."""
 
         if self.llm_provider != "groq" or self.app_env == "test":
             return
-        if self.groq_api_key is None or not self.groq_api_key.get_secret_value().strip():
+        if not self.has_groq_api_key:
             raise ValueError(
                 "GROQ_API_KEY is required when LLM_PROVIDER=groq; add it to the ignored .env file"
             )
@@ -112,6 +124,7 @@ class Settings(BaseSettings):
             "app_host": self.app_host,
             "app_port": self.app_port,
             "llm_provider": self.llm_provider,
+            "effective_llm_provider": self.effective_llm_provider,
             "groq_model": self.groq_model,
             "policy_version": self.policy_version,
             "normalization_version": self.normalization_version,

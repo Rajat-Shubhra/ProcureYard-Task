@@ -75,3 +75,46 @@ def test_active_contract_environment_names_are_explicit_switches(monkeypatch) ->
     assert settings.model_schema_version == "2.0.1"
     assert settings.runtime_schema_version == "2.0.1"
     assert settings.worker_heartbeat_ttl_seconds == 25
+
+
+def test_auto_provider_selects_groq_only_when_key_is_non_blank(tmp_path) -> None:
+    from pathlib import Path
+
+    from app.agent.fallback import HeuristicInterpretationProvider
+    from app.agent.provider import GroqInterpretationProvider
+    from app.conversation.service import ConversationService
+    from app.db import Database
+
+    root = Path(__file__).resolve().parents[1]
+    database = Database(f"sqlite+pysqlite:///{tmp_path / 'cfg.db'}")
+    try:
+        offline = Settings(
+            _env_file=None,
+            app_env="development",
+            llm_provider="auto",
+            groq_api_key="   ",
+        )
+        offline.validate_api_runtime()
+        assert offline.effective_llm_provider == "fake"
+        assert isinstance(
+            ConversationService(database, offline).provider,
+            HeuristicInterpretationProvider,
+        )
+
+        online = Settings(
+            _env_file=None,
+            app_env="development",
+            llm_provider="auto",
+            groq_api_key="gsk_test_key_1234567890",
+            model_prompt_path=root / "project-analysis/STRICT_RULES_SYSTEM_PROMPT.v2.md",
+            model_schema_path=root / "contracts/model_interpretation.v2.schema.json",
+        )
+        online.validate_api_runtime()
+        assert online.effective_llm_provider == "groq"
+        assert "gsk_test_key_1234567890" not in str(online.safe_summary())
+        assert isinstance(
+            ConversationService(database, online).provider,
+            GroqInterpretationProvider,
+        )
+    finally:
+        database.dispose()

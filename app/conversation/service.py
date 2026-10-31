@@ -209,7 +209,7 @@ class ConversationService:
             logger.exception("processing_failure_trace_not_written")
 
     def _build_provider(self) -> InterpretationProvider:
-        if self.settings.llm_provider == "groq":
+        if self.settings.effective_llm_provider == "groq":
             return GroqInterpretationProvider(self.settings)
         return HeuristicInterpretationProvider()
 
@@ -472,6 +472,7 @@ class ConversationService:
                     complaint_ids,
                     ledger,
                     ledger_ok,
+                    language=result.interpretation.language,
                 )
                 if outcome is not None:
                     outcomes.append(outcome)
@@ -491,6 +492,10 @@ class ConversationService:
             supported_amount_values = {
                 item.plan.amount for item in outcomes if item.plan.amount is not None
             }
+            for item in outcomes:
+                breakdown = _breakdown_amounts(item.evaluation)
+                if breakdown is not None:
+                    supported_amount_values.update(breakdown)
             provider_confirmed = any(item.provider_confirmed for item in outcomes)
             approval_pending = any(item.approval_pending for item in outcomes)
             escalation_pending = any(item.escalation_pending for item in outcomes)
@@ -541,7 +546,12 @@ class ConversationService:
             )
             persist_gate_report(session, reply_report, message_id=envelope.message_id)
             if not reply_report.passed:
-                reply = "Aapki request record ho gayi hai. Details verify karke update denge."
+                reply = (
+                    "Your request has been recorded. We will verify the details and share an "
+                    "update."
+                    if result.interpretation.language == "en"
+                    else "Aapki request record ho gayi hai. Details verify karke update denge."
+                )
                 payment_status = "none"
             message.reply = reply
             message.response_payload = {
@@ -758,6 +768,8 @@ class ConversationService:
         complaint_ids: list[str],
         ledger: list[dict[str, Any]],
         ledger_ok: bool,
+        *,
+        language: str = "hinglish",
     ) -> Outcome | None:
         dispute = session.get(Dispute, dispute_id)
         complaints = list(
@@ -796,7 +808,13 @@ class ConversationService:
             ledger=ledger,
         )
         already_actioned = self._already_actioned(
-            session, envelope, dispute, complaint_ids, evaluation, commitments
+            session,
+            envelope,
+            dispute,
+            complaint_ids,
+            evaluation,
+            commitments,
+            language=language,
         )
         if already_actioned is not None:
             return already_actioned
@@ -1000,12 +1018,15 @@ class ConversationService:
         complaint_ids: list[str],
         evaluation: DisputeEvaluation,
         commitments: CommitmentSummary,
+        *,
+        language: str = "hinglish",
     ) -> Outcome | None:
         """Report an existing action instead of deciding again (Gate B rules 1 and 9).
 
         Returns ``None`` when the message brings genuinely new evidence or nothing has been
         committed for this evidence yet.
         """
+        en = language == "en"
         is_incentive = evaluation.complaint_type == "daily_incentive"
         new_evidence = (
             False
@@ -1034,12 +1055,19 @@ class ConversationService:
             suffix = f": {rejected.reviewer_note}" if rejected.reviewer_note else "."
             if rejected.item_type == "approval" and rejected.amount is not None:
                 note = (
-                    f"₹{rejected.amount} ka claim ops team ne review karke decline kiya tha"
+                    f"The ₹{rejected.amount} claim was reviewed and declined by the ops team"
+                    f"{suffix}"
+                    if en
+                    else f"₹{rejected.amount} ka claim ops team ne review karke decline kiya tha"
                     f"{suffix}"
                 )
                 rejected_amount: int | None = rejected.amount
             else:
-                note = f"Aapka case ops team ne review karke close kiya tha{suffix}"
+                note = (
+                    f"Your case was reviewed and closed by the ops team{suffix}"
+                    if en
+                    else f"Aapka case ops team ne review karke close kiya tha{suffix}"
+                )
                 rejected_amount = None
             plan = DecisionPlan(
                 "report_status", "reply_only", rejected_amount, ("ops_rejected",)
@@ -1064,7 +1092,10 @@ class ConversationService:
         if pending is not None and pending.item_type == "escalation":
             outcome.escalation_pending = True
             outcome.status_note = (
-                "Yeh case ops team ke paas review mein hai; update milte hi batayenge."
+                "This case is under review with the ops team; we will share an update once "
+                "resolved."
+                if en
+                else "Yeh case ops team ke paas review mein hai; update milte hi batayenge."
             )
         elif (intent is not None and intent.status == "confirmed") or (
             confirmed and not processing
@@ -1075,20 +1106,34 @@ class ConversationService:
             outcome.provider_confirmed = True
             outcome.plan = replace(outcome.plan, amount=amount)
             outcome.status_note = (
-                f"{trip_label}₹{amount} pehle hi PaySwift par process ho gaya hai."
+                f"{trip_label}₹{amount} has already been processed on PaySwift."
+                if en
+                else f"{trip_label}₹{amount} pehle hi PaySwift par process ho gaya hai."
             )
         elif intent is not None or processing:
             amount = intent.amount if intent is not None else processing
             outcome.action_state = "queued"
             outcome.plan = replace(outcome.plan, amount=amount)
-            outcome.status_note = f"{trip_label}₹{amount} ka payout pehle se processing mein hai."
+            outcome.status_note = (
+                f"{trip_label}₹{amount} payout is already in processing."
+                if en
+                else f"{trip_label}₹{amount} ka payout pehle se processing mein hai."
+            )
         elif (pending is not None and pending.item_type == "approval") or approval:
             amount = pending.amount if pending is not None and pending.amount else approval
             outcome.approval_pending = True
             outcome.plan = replace(outcome.plan, amount=amount)
-            outcome.status_note = f"{trip_label}₹{amount} pehle se ops approval mein hai."
+            outcome.status_note = (
+                f"{trip_label}₹{amount} is already awaiting ops approval."
+                if en
+                else f"{trip_label}₹{amount} pehle se ops approval mein hai."
+            )
         else:
-            outcome.status_note = "Is complaint par pehle hi action ho chuka hai."
+            outcome.status_note = (
+                "Action has already been taken on this complaint."
+                if en
+                else "Is complaint par pehle hi action ho chuka hai."
+            )
         self._trace_already_actioned(session, envelope, dispute, outcome.plan, commitments)
         return outcome
 
@@ -1124,24 +1169,36 @@ class ConversationService:
         gate: GateReport,
         outcomes: list[Outcome],
     ) -> tuple[str, str]:
+        en = result.interpretation.language == "en"
         if any(
             reason in {"identity_or_privacy_risk", "prompt_injection"}
             for reason in gate.blocking_reasons
         ):
-            return "Is request ko payout action ke liye use nahi kar sakta.", "none"
+            return (
+                "Cannot use this request for a payout action; I can only check the account linked "
+                "to this number."
+                if en
+                else "Is request ko payout action ke liye use nahi kar sakta."
+            ), "none"
         if (
             not result.interpretation.complaints
             and result.interpretation.requested_status != "not_applicable"
         ):
-            return self._status_reply(session, envelope.rider_id)
+            return self._status_reply(
+                session, envelope.rider_id, language=result.interpretation.language
+            )
         if (
             not result.interpretation.complaints
             and result.interpretation.message_intent == "greeting_or_thanks"
         ):
             return (
-                "Shukriya! Agar koi aur payout sawaal ho to date ya order ID ke saath batayein.",
-                "none",
-            )
+                "Thanks! Share a date or trip ID if you have another payout question."
+                if en
+                else (
+                    "Shukriya! Agar koi aur payout sawaal ho to date ya order ID ke saath "
+                    "batayein."
+                )
+            ), "none"
         lines: list[str] = []
         statuses: set[str] = set()
         for index, item in enumerate(outcomes, start=1):
@@ -1149,6 +1206,7 @@ class ConversationService:
             amount = item.plan.amount
             evaluation = item.evaluation
             trip_label = f"{', '.join(evaluation.trip_ids)}: " if evaluation.trip_ids else ""
+            breakdown_text = _breakdown_text(evaluation, en=en)
             if item.plan.outcome == "report_status":
                 lines.append(f"{prefix}{item.status_note}")
                 if item.provider_confirmed:
@@ -1161,46 +1219,87 @@ class ConversationService:
                     statuses.add("processing")
             elif item.plan.outcome == "auto_pay" and amount is not None:
                 if item.provider_confirmed:
-                    lines.append(f"{prefix}{trip_label}₹{amount} PaySwift par process ho gaya hai.")
+                    lines.append(
+                        f"{prefix}{trip_label}₹{amount}{breakdown_text} has been processed on "
+                        "PaySwift."
+                        if en
+                        else f"{prefix}{trip_label}₹{amount}{breakdown_text} PaySwift par process "
+                        "ho gaya hai."
+                    )
                     statuses.add("paid")
                 else:
                     lines.append(
-                        f"{prefix}{trip_label}₹{amount} verified hai aur processing mein hai."
+                        f"{prefix}{trip_label}₹{amount} shortfall verified{breakdown_text} and "
+                        "queued for payout."
+                        if en
+                        else f"{prefix}{trip_label}₹{amount} verified hai{breakdown_text} aur "
+                        "processing mein hai."
                     )
                     statuses.add("processing")
             elif item.plan.outcome == "seek_approval" and amount is not None:
                 lines.append(
-                    f"{prefix}{trip_label}₹{amount} verified hai aur ops approval mein hai."
+                    f"{prefix}{trip_label}₹{amount} shortfall verified{breakdown_text} and queued "
+                    "for ops approval."
+                    if en
+                    else f"{prefix}{trip_label}₹{amount} verified hai{breakdown_text} aur ops "
+                    "approval mein hai."
                 )
                 statuses.add("awaiting_approval")
             elif item.plan.outcome == "escalate":
-                lines.append(f"{prefix}{_escalation_line(item.plan, evaluation)}")
+                lines.append(
+                    f"{prefix}{_escalation_line(item.plan, evaluation, en=en)}"
+                )
                 statuses.add("escalated")
             elif evaluation.ownership == "mismatch":
-                lines.append(f"{prefix}Is trip ko aapke account se verify nahi kar paaya.")
-            elif evaluation.policy_window == "expired":
-                lines.append(f"{prefix}Yeh complaint 7-day policy window ke bahar hai.")
-            elif evaluation.complaint_type == "daily_incentive":
                 lines.append(
-                    f"{prefix}{evaluation.completed_trip_count or 0} completed trips verify hue; "
-                    "incentive ke liye 12 chahiye. Koi payable shortfall nahi mila."
+                    f"{prefix}Could not verify this trip on your account."
+                    if en
+                    else f"{prefix}Is trip ko aapke account se verify nahi kar paaya."
+                )
+            elif evaluation.policy_window == "expired":
+                lines.append(
+                    f"{prefix}This complaint is outside the 7-day policy window."
+                    if en
+                    else f"{prefix}Yeh complaint 7-day policy window ke bahar hai."
+                )
+            elif evaluation.complaint_type == "daily_incentive":
+                count = evaluation.completed_trip_count or 0
+                lines.append(
+                    f"{prefix}{count} completed trips verified; 12 are required for the daily "
+                    "incentive. No unpaid shortfall found."
+                    if en
+                    else f"{prefix}{count} completed trips verify hue; incentive ke liye 12 "
+                    "chahiye. Koi payable shortfall nahi mila."
                 )
             elif evaluation.complaint_type == "distance":
                 lines.append(
-                    f"{prefix}Export ka recorded distance check hua, lekin actual route distance "
-                    "source se prove nahi ho sakta; automatic payment nahi kar sakta."
+                    f"{prefix}Checked recorded export distance, but actual route distance cannot "
+                    "be verified from source data; automatic payout is not possible."
+                    if en
+                    else f"{prefix}Export ka recorded distance check hua, lekin actual route "
+                    "distance source se prove nahi ho sakta; automatic payment nahi kar sakta."
                 )
             elif evaluation.complaint_type == "policy_exception":
                 lines.append(
-                    f"{prefix}Recorded rider cancellation par policy penalty hai; exception "
+                    f"{prefix}Recorded rider cancellation carries a policy penalty; an exception "
+                    "cannot be approved automatically."
+                    if en
+                    else f"{prefix}Recorded rider cancellation par policy penalty hai; exception "
                     "automatically approve nahi ho sakta."
                 )
             elif item.plan.outcome == "fail_safe":
-                lines.append(f"{prefix}Safe verification complete nahi hui; koi action nahi liya.")
+                lines.append(
+                    f"{prefix}Safe verification could not be completed; no payout action was taken."
+                    if en
+                    else f"{prefix}Safe verification complete nahi hui; koi action nahi liya."
+                )
             else:
-                trip_text = ", ".join(evaluation.trip_ids)
-                detail = f" ({trip_text})" if trip_text else ""
-                lines.append(f"{prefix}Records check hue{detail}; koi unpaid shortfall nahi mila.")
+                detail = _no_shortfall_detail(evaluation, en=en)
+                lines.append(
+                    f"{prefix}Records checked{detail}; no unpaid shortfall was found."
+                    if en
+                    else f"{prefix}Records check hue{detail}; koi unpaid shortfall nahi mila."
+                )
         if not lines:
             missing = next(
                 (
@@ -1210,12 +1309,21 @@ class ConversationService:
                 ),
                 ("date", "trip_id"),
             )
+            if en:
+                requested = " or ".join(field.replace("_", " ") for field in missing[:2])
+                return (
+                    f"Please share the {requested}, and I will check the exact payout.",
+                    "none",
+                )
             requested = " ya ".join(missing[:2])
             return f"Please {requested} share karein, phir main exact payout check karunga.", "none"
         status = next(iter(statuses)) if len(statuses) == 1 else "mixed" if statuses else "none"
         return " ".join(lines), status
 
-    def _status_reply(self, session: Session, rider_id: str) -> tuple[str, str]:
+    def _status_reply(
+        self, session: Session, rider_id: str, *, language: str = "hinglish"
+    ) -> tuple[str, str]:
+        en = language == "en"
         lines: list[str] = []
         statuses: set[str] = set()
         pending = session.scalar(
@@ -1231,16 +1339,32 @@ class ConversationService:
             .limit(1)
         )
         if intent is not None and intent.status == "confirmed":
-            lines.append(f"₹{intent.amount} PaySwift par process ho gaya hai.")
+            lines.append(
+                f"₹{intent.amount} has been processed on PaySwift."
+                if en
+                else f"₹{intent.amount} PaySwift par process ho gaya hai."
+            )
             statuses.add("paid")
         elif intent is not None and intent.status != "failed":
-            lines.append(f"₹{intent.amount} payout processing mein hai.")
+            lines.append(
+                f"₹{intent.amount} payout is currently in processing."
+                if en
+                else f"₹{intent.amount} payout processing mein hai."
+            )
             statuses.add("processing")
         if pending is not None and pending.item_type == "approval" and pending.amount is not None:
-            lines.append(f"₹{pending.amount} ops approval mein hai.")
+            lines.append(
+                f"₹{pending.amount} is awaiting ops approval."
+                if en
+                else f"₹{pending.amount} ops approval mein hai."
+            )
             statuses.add("awaiting_approval")
         elif pending is not None:
-            lines.append("Aapka case ops team ke paas review mein hai.")
+            lines.append(
+                "Your case is under review with the ops team."
+                if en
+                else "Aapka case ops team ke paas review mein hai."
+            )
             statuses.add("escalated")
         if not lines:
             resolved = session.scalar(
@@ -1253,12 +1377,24 @@ class ConversationService:
                 note = f": {resolved.reviewer_note}" if resolved.reviewer_note else "."
                 if resolved.item_type == "approval" and resolved.amount is not None:
                     lines.append(
-                        f"₹{resolved.amount} ka claim ops team ne review karke decline kiya{note}"
+                        f"The ₹{resolved.amount} claim was reviewed and declined by the ops team"
+                        f"{note}"
+                        if en
+                        else f"₹{resolved.amount} ka claim ops team ne review karke decline kiya"
+                        f"{note}"
                     )
                 else:
-                    lines.append(f"Aapka case ops team ne review karke close kiya{note}")
+                    lines.append(
+                        f"Your case was reviewed and closed by the ops team{note}"
+                        if en
+                        else f"Aapka case ops team ne review karke close kiya{note}"
+                    )
             else:
-                lines.append("Abhi koi pending payment ya approval nahi mila.")
+                lines.append(
+                    "No pending payout or approval was found."
+                    if en
+                    else "Abhi koi pending payment ya approval nahi mila."
+                )
         status = next(iter(statuses)) if len(statuses) == 1 else "mixed" if statuses else "none"
         return " ".join(lines), status
 
@@ -1476,34 +1612,101 @@ def _can_attach_follow_up(
     return True
 
 
-def _escalation_line(plan: DecisionPlan, evaluation: DisputeEvaluation) -> str:
+def _breakdown_amounts(evaluation: DisputeEvaluation) -> tuple[int, int] | None:
+    if (
+        evaluation.ownership != "verified"
+        or evaluation.policy_window != "eligible"
+        or not evaluation.evidence_complete
+        or evaluation.source_ambiguous
+        or "prior_commitment_deducted" in evaluation.reason_codes
+        or evaluation.complaint_type in {"daily_incentive", "cancellation_penalty"}
+        or evaluation.expected_total is None
+        or evaluation.actual_total is None
+        or evaluation.expected_total < 0
+        or evaluation.actual_total < 0
+    ):
+        return None
+    return (evaluation.expected_total, evaluation.actual_total)
+
+
+def _breakdown_text(evaluation: DisputeEvaluation, *, en: bool) -> str:
+    amounts = _breakdown_amounts(evaluation)
+    if amounts is None:
+        return ""
+    expected, actual = amounts
+    if en:
+        return f" (expected ₹{expected}, recorded ₹{actual})"
+    return f" (banta ₹{expected}, mila ₹{actual})"
+
+
+def _no_shortfall_detail(evaluation: DisputeEvaluation, *, en: bool) -> str:
+    trip_text = ", ".join(evaluation.trip_ids)
+    amounts = _breakdown_amounts(evaluation)
+    if amounts is not None:
+        expected, actual = amounts
+        math_text = (
+            f"expected ₹{expected}, recorded ₹{actual}"
+            if en
+            else f"banta ₹{expected}, mila ₹{actual}"
+        )
+        return f" ({trip_text}: {math_text})" if trip_text else f" ({math_text})"
+    return f" ({trip_text})" if trip_text else ""
+
+
+def _escalation_line(
+    plan: DecisionPlan, evaluation: DisputeEvaluation, *, en: bool = False
+) -> str:
     category = plan.escalation_category or ""
     if category == "ownership":
-        return "Is trip ko aapke account se verify nahi kar paaya; ops team check karegi."
+        return (
+            "Could not verify this trip on your account; escalated to the ops team for review."
+            if en
+            else "Is trip ko aapke account se verify nahi kar paaya; ops team check karegi."
+        )
     if category == "distance":
         return (
-            "Export ka recorded distance check hua, lekin actual route distance source se "
+            "Checked recorded export distance, which cannot verify actual route distance; "
+            "escalated to ops for review."
+            if en
+            else "Export ka recorded distance check hua, lekin actual route distance source se "
             "prove nahi ho sakta; ops team review karegi."
         )
     if category == "policy_exception":
         return (
-            "Recorded rider cancellation par policy penalty hai; exception ke liye case ops "
+            "Recorded rider cancellation carries a policy penalty; escalated to ops for exception "
+            "review."
+            if en
+            else "Recorded rider cancellation par policy penalty hai; exception ke liye case ops "
             "team ke paas review mein hai."
         )
     if category == "record_disagreement":
         if evaluation.complaint_type == "daily_incentive":
             count = evaluation.completed_trip_count or 0
             return (
-                f"Dobara check kiya: record mein {count} completed trips hain (incentive ke liye "
-                "12 chahiye). Aapka disagreement ops team ko review ke liye diya hai."
+                f"Rechecked records: {count} completed trips found (12 required for incentive). "
+                "Escalated your disagreement to ops for review."
+                if en
+                else f"Dobara check kiya: record mein {count} completed trips hain (incentive ke "
+                "liye 12 chahiye). Aapka disagreement ops team ko review ke liye diya hai."
             )
         return (
-            "Dobara check kiya, record wahi hai; aapka disagreement ops team ko review ke "
+            "Rechecked records with the same result; escalated your disagreement to ops for "
+            "review."
+            if en
+            else "Dobara check kiya, record wahi hai; aapka disagreement ops team ko review ke "
             "liye diya hai."
         )
     if category == "data_quality":
-        return "Is trip ke source records mein conflict hai; ops team verify karegi."
-    return "Is complaint ko ops investigation ke liye refer kiya hai."
+        return (
+            "Source records for this trip conflict; escalated to the ops team for verification."
+            if en
+            else "Is trip ke source records mein conflict hai; ops team verify karegi."
+        )
+    return (
+        "Referred this complaint to the ops team for investigation."
+        if en
+        else "Is complaint ko ops investigation ke liye refer kiya hai."
+    )
 
 
 def _disagreement_reason(evaluation: DisputeEvaluation) -> str:
