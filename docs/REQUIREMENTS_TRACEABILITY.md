@@ -5,6 +5,7 @@ Status values:
 - `Frozen` — represented by a Phase 0 contract/decision.
 - `Implemented` — deterministic code and automated acceptance evidence exist.
 - `Planned` — mapped to a later implementation phase and acceptance evidence.
+- `External` — verified in GitHub repository settings outside application code.
 - `Assumption` — repository text is ambiguous; the chosen interpretation is explicit and reviewable.
 
 | Source requirement | Phase 0 contract/decision | Implementation phase | Acceptance evidence | Status |

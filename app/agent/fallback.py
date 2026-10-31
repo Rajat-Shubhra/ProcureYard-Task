@@ -30,7 +30,7 @@ HINGLISH_WORD_RE = re.compile(
     r"kitna|tarikh|wala|wali|wale|aaya|aaye|aayi|aayega|mila|mili|mile|kata|kaata|"
     r"kiye|kiya|karo|kardo|karna|chahiye|galat|kam|zyada|dobara|baar|hai|hain|"
     r"tha|thi|hua|hui|isliye|bahut|jaldi|turant|thik|theek|shukriya|dhanyavad|"
-    r"dhanyawad|kal|aaj|parso|laga|raha)\b",
+    r"dhanyawad|ji|haan|kal|aaj|parso|laga|raha)\b",
     re.IGNORECASE,
 )
 MONTH_MAP = {
@@ -319,9 +319,9 @@ def _complaint_specs(text: str) -> list[tuple[str, str]]:
 
 
 NOT_A_DAY_AFTER_RE = re.compile(
-    r"\s*(?:\.\d|order|trip|deliver(?:y|ies)|rides?|rupay|rupaye|rupees?|rs\b|₹|"
+    r"\s*(?:\.\d|-\s*\d|order|trip|deliver(?:y|ies)|rides?|rupay|rupaye|rupees?|rs\b|₹|"
     r"kiye|kiya|baar|times?\b|km\b|kms\b|x\b|%|se\s+zyada|complete|hrs?\b|hours?\b|"
-    r"mins?\b|minutes?\b|days?\b)",
+    r"mins?\b|minutes?\b|days?\b|am\b|pm\b)",
     re.IGNORECASE,
 )
 NOT_A_DAY_BEFORE_RE = re.compile(
@@ -370,8 +370,16 @@ def _dates(text: str, context: InterpretationContext) -> list[str]:
         span = match.span()
         if _overlaps(span, matched_spans):
             continue
+        following = text[span[1] : span[1] + 16]
+        preceding = text[max(0, span[0] - 10) : span[0]]
+        if NOT_A_DAY_AFTER_RE.match(following) or NOT_A_DAY_BEFORE_RE.search(preceding):
+            continue
         day_val, month_val = int(match.group(1)), int(match.group(2))
         year_raw = match.group(3)
+        sep = text[match.end(1)]
+        if sep == "-" and year_raw is None and len(match.group(2)) < 2:
+            # Bare "2-3" or "10-11" without a zero-padded month or year is usually a numeric range.
+            continue
         if (day_val, month_val) == (24, 7) and year_raw is None:
             continue
         year_val = (

@@ -929,6 +929,17 @@ def test_offline_parser_supports_expanded_english_phrasings_and_date_formats(sta
     )
     assert "₹10 shortfall verified" in r014.reply
 
+    # Numeric ranges like "10-12 orders" must not be misread as DD-MM (10 Dec -> expired window)
+    r013_range = service.process(
+        envelope(
+            "w_exp_range",
+            "R013",
+            "I completed 10-12 orders, my payout is wrong",
+            "2026-09-22T10:30:00+05:30",
+        )
+    )
+    assert "7-day" not in r013_range.reply and "date" in r013_range.reply.lower()
+
     # English incentive explanation followed by English recheck pushback -> record_disagreement
     r011_first = service.process(
         envelope(

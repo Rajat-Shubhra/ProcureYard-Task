@@ -13,6 +13,7 @@ from sqlalchemy import select
 from app.db import Database
 from app.models import Decision, Dispute, Evidence, Message, OpsItem, TraceEvent
 from app.ops.service import OpsConflictError, OpsNotFoundError, OpsResult, OpsService
+from app.trace import redact_trace_payload
 
 router = APIRouter(tags=["ops"])
 
@@ -117,8 +118,8 @@ def ops_item_page(item_id: str, request: Request) -> HTMLResponse:
             f"<td>{escape(event.created_at.isoformat())}</td>"
             f"<td>{escape(event.event_type)}</td>"
             f"<td>{escape(event.name)}</td>"
-            f"<td><pre>{escape(json.dumps(event.input_payload, default=str)[:600])}</pre></td>"
-            f"<td><pre>{escape(json.dumps(event.output_payload, default=str)[:600])}</pre></td>"
+            f"<td><pre>{_trace_cell(event.input_payload, event.rider_id)}</pre></td>"
+            f"<td><pre>{_trace_cell(event.output_payload, event.rider_id)}</pre></td>"
             "</tr>"
             for event in events
         )
@@ -172,6 +173,11 @@ _SCRIPT = (
     "document.getElementById('result').textContent=r.status+' '+await r.text();"
     "if(r.ok){setTimeout(()=>location.reload(),800);}}"
 )
+
+
+def _trace_cell(payload: object, rider_id: str) -> str:
+    redacted = redact_trace_payload(payload, rider_id=rider_id)
+    return escape(json.dumps(redacted, default=str)[:600])
 
 
 def _button(item_id: str, action: str, label: str) -> str:
