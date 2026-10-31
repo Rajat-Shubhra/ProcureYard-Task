@@ -24,7 +24,7 @@ from app.db import Database
 from app.domain.decision import plan_decision
 from app.domain.payout import DisputeEvaluation, PayoutPolicyEngine
 from app.ingestion.service import ImportService
-from app.models import Base, Decision, Dispute, OpsItem, PayoutIntent
+from app.models import Base, Complaint, Decision, Dispute, OpsItem, PayoutIntent
 from app.ops.service import OpsService
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -151,6 +151,43 @@ def test_resent_complaint_on_a_later_day_is_not_paid_twice(stack) -> None:
     assert state["intents"] == [(25, "confirmed")], state
     assert state["pending_approvals"] == [] and state["decisions"] == 1
     assert "pehle hi" in second.reply and "₹25" in second.reply
+
+
+def test_verified_trip_date_groups_wrong_date_then_undated_follow_up(stack) -> None:
+    database, service, _, _ = stack
+
+    first = service.process(
+        envelope(
+            "w1",
+            "R035",
+            "21 ko order T176205 ka surge nahi mila",
+            "2026-09-22T11:00:00+05:30",
+        )
+    )
+    second = service.process(
+        envelope(
+            "w2",
+            "R035",
+            "order T176205 ka surge nahi mila",
+            "2026-09-22T11:05:00+05:30",
+        )
+    )
+
+    state = money(database)
+    assert "₹37" in first.reply and "processing" in second.reply
+    assert state["intents"] == [(37, "queued")]
+    assert state["decisions"] == 1
+    with database.session() as session:
+        disputes = list(session.scalars(select(Dispute)))
+        complaint_dispute_ids = list(
+            session.scalars(select(Complaint.dispute_id).order_by(Complaint.created_at))
+        )
+        intent = session.scalar(select(PayoutIntent))
+    assert len(disputes) == 1
+    assert disputes[0].service_date_ist == date(2026, 9, 20)
+    assert disputes[0].state == "payout_processing"
+    assert complaint_dispute_ids == [disputes[0].dispute_id, disputes[0].dispute_id]
+    assert intent is not None and intent.dispute_id == disputes[0].dispute_id
 
 
 def test_resend_on_the_same_day_creates_no_duplicate_approval(stack) -> None:

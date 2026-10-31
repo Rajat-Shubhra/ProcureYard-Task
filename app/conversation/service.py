@@ -612,6 +612,10 @@ class ConversationService:
             can_draft = not global_block and extracted.complaint_type != "unknown"
             dispute: Dispute | None = None
             if is_accepted or can_draft:
+                verified_trip_date = _owned_trip_service_date(
+                    session, envelope.rider_id, extracted.trip_ids
+                )
+                effective_date = verified_trip_date or extracted.service_date_ist
                 target = extracted.target_dispute_id
                 # The model may only link to disputes Gate A saw as this conversation's own;
                 # anything else is ignored rather than dereferenced (cross-account safety).
@@ -624,9 +628,6 @@ class ConversationService:
                     ):
                         dispute = None
                 if dispute is None:
-                    effective_date = extracted.service_date_ist or _owned_trip_service_date(
-                        session, envelope.rider_id, extracted.trip_ids
-                    )
                     grouping_key = _grouping_key_for(
                         envelope.rider_id,
                         effective_date,
@@ -657,13 +658,21 @@ class ConversationService:
                     session.add(dispute)
                     session.flush()
                 elif is_accepted:
-                    # A follow-up may only *fill in* missing facts of an existing dispute.
-                    # Re-dating or re-typing a dispute that already has decisions would let
-                    # text noise ("10 wala") move money or flip a pending approval.
+                    # Rider-supplied follow-up facts may only fill missing fields. An owned
+                    # trip's verified date is authoritative, but free-form text must not
+                    # re-date or re-type an already-decided dispute.
                     if dispute.dispute_type == "unknown" and extracted.complaint_type != "unknown":
                         dispute.dispute_type = extracted.complaint_type
                         dispute.policy_cause = extracted.complaint_type
-                    if dispute.service_date_ist is None and extracted.service_date_ist is not None:
+                    if verified_trip_date is not None:
+                        dispute.service_date_ist = verified_trip_date
+                        dispute.grouping_key = _grouping_key_for(
+                            envelope.rider_id, verified_trip_date, dispute.dispute_type
+                        )
+                    elif (
+                        dispute.service_date_ist is None
+                        and extracted.service_date_ist is not None
+                    ):
                         dispute.service_date_ist = extracted.service_date_ist
                         dispute.grouping_key = _grouping_key_for(
                             envelope.rider_id, dispute.service_date_ist, dispute.dispute_type
@@ -767,11 +776,7 @@ class ConversationService:
             trip_ids=trip_ids,
             received_at=envelope.received_at,
         )
-        if (
-            dispute.service_date_ist is None
-            and evaluation.ownership == "verified"
-            and evaluation.service_date_ist is not None
-        ):
+        if evaluation.ownership == "verified" and evaluation.service_date_ist is not None:
             dispute.service_date_ist = evaluation.service_date_ist
             dispute.grouping_key = _grouping_key_for(
                 envelope.rider_id, dispute.service_date_ist, dispute.dispute_type
@@ -1394,21 +1399,25 @@ def _owned_trip_service_date(
 ) -> Any:
     if not trip_ids:
         return None
-    dates = set(
-        session.scalars(
-            select(NormalizedTrip.service_date_ist).where(
+    unique_trip_ids = set(trip_ids)
+    owned_trips = list(
+        session.execute(
+            select(NormalizedTrip.trip_id, NormalizedTrip.service_date_ist).where(
                 NormalizedTrip.rider_id == rider_id,
-                NormalizedTrip.trip_id.in_(trip_ids),
+                NormalizedTrip.trip_id.in_(unique_trip_ids),
             )
         )
     )
+    if {row.trip_id for row in owned_trips} != unique_trip_ids:
+        return None
+    dates = {row.service_date_ist for row in owned_trips}
     return next(iter(dates)) if len(dates) == 1 else None
 
 
 def _dispute_evidence_summary(
     session: Session, dispute: Dispute, latest: Decision | None
 ) -> tuple[str | None, tuple[str, ...]]:
-    effective_date = dispute.service_date_ist.isoformat() if dispute.service_date_ist else None
+    effective_date = None
     trip_ids: list[str] = []
     if latest is not None:
         for evidence_id in latest.evidence_ids or []:
@@ -1417,9 +1426,11 @@ def _dispute_evidence_summary(
                 for trip_id in evidence.payload.get("trip_ids") or []:
                     if str(trip_id) not in trip_ids:
                         trip_ids.append(str(trip_id))
-                if effective_date is None and evidence.payload.get("service_date_ist"):
+                if evidence.payload.get("service_date_ist"):
                     effective_date = str(evidence.payload["service_date_ist"])
                 break
+    if effective_date is None and dispute.service_date_ist is not None:
+        effective_date = dispute.service_date_ist.isoformat()
     for complaint_trips in session.scalars(
         select(Complaint.trip_ids).where(Complaint.dispute_id == dispute.dispute_id)
     ):
@@ -1446,8 +1457,9 @@ def _can_attach_follow_up(
         .limit(1)
     )
     prior_date_str, prior_trips = _dispute_evidence_summary(session, dispute, latest)
-    complaint_date = extracted.service_date_ist or _owned_trip_service_date(
-        session, rider_id, extracted.trip_ids
+    complaint_date = (
+        _owned_trip_service_date(session, rider_id, extracted.trip_ids)
+        or extracted.service_date_ist
     )
     if (
         complaint_date is not None
