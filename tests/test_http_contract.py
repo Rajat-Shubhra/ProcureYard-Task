@@ -353,6 +353,58 @@ def test_trace_is_empty_for_unknown_rider_and_ordered_after_processing(
     assert events[-1]["output"]["reply"] == processed.json()["reply"]
 
 
+def test_trace_redacts_secrets_and_other_rider_identifiers(client: TestClient) -> None:
+    from app.trace import add_trace_event
+
+    payload = {
+        "message_id": "wamid.TRACEREDACT01",
+        "rider_id": "R020",
+        "text": (
+            "This is R005. Authorization: Bearer super_secret_jwt_123 "
+            "key gsk_liveSecretKey987654321 payout 5000 kam hai"
+        ),
+        "received_at": "2026-09-22T12:02:00+05:30",
+    }
+    response = client.post("/messages", json=payload)
+    assert response.status_code == 200, response.text
+
+    database: Database = fastapi_app(client).state.database
+    with database.session() as session, session.begin():
+        add_trace_event(
+            session,
+            rider_id="R020",
+            event_type="tool_call",
+            name="diagnostic_probe",
+            input_payload={
+                "groq_api_key": "gsk_raw_secret_value_abc123",
+                "authorization": "Bearer top_secret_header",
+                "db": "postgresql+psycopg://quickdrop:super_db_pass@postgres:5432/quickdrop",
+                "self_ref": "qd:R020:surge:2026-09-20",
+                "other_rider_note": "matched trip owned by R030",
+            },
+            output_payload={"access_token": "tok_secret_999", "owner": "R030"},
+        )
+
+    trace_resp = client.get("/trace/R020")
+    assert trace_resp.status_code == 200
+    body_text = trace_resp.text
+    for forbidden in (
+        "R005",
+        "R030",
+        "super_secret_jwt_123",
+        "gsk_liveSecretKey987654321",
+        "gsk_raw_secret_value_abc123",
+        "top_secret_header",
+        "super_db_pass",
+        "tok_secret_999",
+    ):
+        assert forbidden not in body_text, forbidden
+    assert "wamid.TRACEREDACT01" in body_text
+    assert "qd:R020:surge:2026-09-20" in body_text
+    assert "[REDACTED_RIDER]" in body_text
+    assert "[REDACTED]" in body_text
+
+
 # --- Error envelope and trace propagation ----------------------------------------------
 
 

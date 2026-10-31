@@ -831,3 +831,136 @@ def test_rejected_escalation_status_and_resend_never_render_rupee_none(stack) ->
     state = money(database)
     assert state["intents"] == []
     assert [op for op in state["ops"] if op[2] == "pending"] == []
+
+
+# --- Final polish: English replies + verified breakdown + expanded offline parser
+
+
+def test_english_complaint_and_follow_up_render_english_replies_with_verified_breakdown(
+    stack,
+) -> None:
+    from app.models import GateRun
+
+    database, service, _, ledger = stack
+    first = service.process(
+        envelope(
+            "w_en_1",
+            "R026",
+            "Trip T672899 on 19th was 7.4 km but I got only Rs 25 for it. Please check.",
+            "2026-09-23T11:00:00+05:30",
+        )
+    )
+    assert "T672899" in first.reply
+    assert "₹32 shortfall verified (expected ₹57, recorded ₹25)" in first.reply
+    assert "hai" not in first.reply.lower() and "banta" not in first.reply.lower()
+
+    status_queued = service.process(
+        envelope(
+            "w_en_2",
+            "R026",
+            "What is the status of my payout?",
+            "2026-09-23T11:05:00+05:30",
+        )
+    )
+    assert status_queued.reply == "₹32 payout is currently in processing."
+
+    confirm_in_payswift(database, ledger, payout_id="po_r026")
+    status_paid = service.process(
+        envelope(
+            "w_en_3",
+            "R026",
+            "Any update on my payout?",
+            "2026-09-23T11:10:00+05:30",
+        )
+    )
+    assert status_paid.reply == "₹32 has been processed on PaySwift."
+
+    with database.session() as session:
+        reply_gates = list(
+            session.scalars(select(GateRun).where(GateRun.gate == "reply"))
+        )
+    assert len(reply_gates) == 3 and all(run.passed for run in reply_gates)
+
+
+def test_offline_parser_supports_expanded_english_phrasings_and_date_formats(stack) -> None:
+    database, service, _, _ = stack
+
+    # DD/MM format + English surge complaint
+    r003 = service.process(
+        envelope(
+            "w_exp_1",
+            "R003",
+            "My surge payout on 20/09 is missing",
+            "2026-09-22T09:05:00+05:30",
+        )
+    )
+    assert "₹25 shortfall verified (expected ₹74, recorded ₹49)" in r003.reply
+
+    # YYYY-MM-DD format + English missing-payment complaint above ₹200 auto-limit
+    r034 = service.process(
+        envelope(
+            "w_exp_2",
+            "R034",
+            "I did not receive payment for 3 orders on 2026-09-19",
+            "2026-09-23T11:30:00+05:30",
+        )
+    )
+    assert "₹249 shortfall verified" in r034.reply and "ops approval" in r034.reply
+
+    # Relative English "yesterday" + daily bonus phrasing
+    r005 = service.process(
+        envelope(
+            "w_exp_3",
+            "R005",
+            "I completed 12 orders yesterday, daily bonus not received",
+            "2026-09-22T09:20:00+05:30",
+        )
+    )
+    assert "₹150 shortfall verified" in r005.reply
+
+    # DD-MM format + "twice" double-deduction in English (must auto-pay ₹10, not policy_exception)
+    r014 = service.process(
+        envelope(
+            "w_exp_4",
+            "R014",
+            "Why was cancellation penalty deducted twice on 18-09?",
+            "2026-09-22T11:00:00+05:30",
+        )
+    )
+    assert "₹10 shortfall verified" in r014.reply
+
+    # Numeric ranges like "10-12 orders" must not be misread as DD-MM (10 Dec -> expired window)
+    r013_range = service.process(
+        envelope(
+            "w_exp_range",
+            "R013",
+            "I completed 10-12 orders, my payout is wrong",
+            "2026-09-22T10:30:00+05:30",
+        )
+    )
+    assert "7-day" not in r013_range.reply and "date" in r013_range.reply.lower()
+
+    # English incentive explanation followed by English recheck pushback -> record_disagreement
+    r011_first = service.process(
+        envelope(
+            "w_exp_5a",
+            "R011",
+            "Completed 12 trips on Sep 19, incentive is missing",
+            "2026-09-22T10:10:00+05:30",
+        )
+    )
+    assert "10 completed trips verified; 12 are required" in r011_first.reply
+    r011_second = service.process(
+        envelope(
+            "w_exp_5b",
+            "R011",
+            "Please recheck, your record is wrong",
+            "2026-09-22T10:12:00+05:30",
+        )
+    )
+    assert "Rechecked records: 10 completed trips found" in r011_second.reply
+
+    state = money(database)
+    assert sorted(state["intents"]) == [(10, "queued"), (25, "queued"), (150, "queued")]
+    assert state["pending_approvals"] == [249]
+    assert len(state["escalations"]) == 1

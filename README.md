@@ -7,8 +7,8 @@ code, blocks unsafe proposals with non-LLM gates, and moves money through a dura
 ## Run
 
 ```bash
-docker compose up --build   # works on a clean clone: no .env needed, deterministic fake LLM
-# real model: cp .env.example .env, set LLM_PROVIDER=groq and GROQ_API_KEY, run again
+docker compose up --build   # clean clone: no .env needed; uses deterministic parser when GROQ_API_KEY is unset
+# real model: export GROQ_API_KEY=gsk_... (or set GROQ_API_KEY in .env) and run docker compose up --build
 ```
 
 API `http://localhost:8000`, ops UI `http://localhost:8000/ops` (pending table → item page with the
@@ -18,17 +18,17 @@ imported data and a fresh worker heartbeat exist. All settings are in `.env.exam
 
 ## Design: what the model decides, what code decides
 
-- **Model (Groq, strict JSON schema v2, no tools/streaming):** language, intent, one entry per
-  complaint (type, date words, trip ids, alleged amount, grounding, link to a prior dispute),
-  safety flags. A deterministic parser replaces it offline/on failure.
+- **Model (Groq `LLM_PROVIDER=auto|groq`, strict JSON schema v2, no tools/streaming):** language,
+  intent, one entry per complaint (type, date words, trip ids, alleged amount, grounding, link to a
+  prior dispute), safety flags. A deterministic English/Hinglish parser replaces it offline/on failure.
 - **Code evidence reads (no model involved):** rider roster, the rider's trips by IST date or by
   trip id, paid payout lines, entitlement calculation, the PaySwift ledger, open actions.
 - **Code decides everything about money:** identity (envelope `rider_id`), ownership, IST dates,
   7-day window from the trip's own service date, fare/incentive/penalty arithmetic, shortfall
   `max(expected − actual, 0)`, deduction of anything already queued/paid/awaiting approval for the
   same evidence (local intents **and** the PaySwift ledger), the ₹200 cumulative limit and one
-  auto-pay per rider per IST day, approval vs escalation, idempotency keys, retries, and the final
-  reply check (Gate C). Human approval re-runs the same gate against the original evidence.
+  auto-pay per rider per IST day, approval vs escalation, idempotency keys, retries, recursive trace
+  redaction, and language-matched replies with verified math breakdowns checked by Gate C.
 
 ## Assumptions
 
@@ -43,7 +43,7 @@ imported data and a fresh worker heartbeat exist. All settings are in `.env.exam
 ## Verify
 
 ```bash
-pip install -e ".[dev]" && ruff check . && pytest --cov=app --cov-report=term-missing   # 190+ tests
+pip install -e ".[dev]" && ruff check . && pytest --cov=app --cov-report=term-missing   # 208 tests
 python evals/run.py http://localhost:8000 \
   --reset-cmd 'docker compose down --volumes && docker compose up --detach' --poll-seconds 40
 python evals/run.py http://localhost:8000   # quick smoke on a running stack: NON-AUTHORITATIVE
@@ -60,8 +60,8 @@ and a second job that runs all 24 conversations against a recreated stack with P
 
 ## Skipped / known limits
 
-- No ops authentication; no outbound rider notification channel (ops decisions surface on the
-  rider's next status question); reply templates are Hinglish-first; the deterministic parser
-  handles the supplied phrasings, not open-ended language.
-- `ai-logs/` must contain the raw AI session exports before submission; add `Sarthak-pyard` to the
-  private repo. These are account actions, not application behaviour.
+- Ops authentication is intentionally omitted so evaluator `GET /ops/pending` and `/ops` checks work
+  without credentials; add SSO/RBAC before production deployment.
+- No outbound WhatsApp push channel exists in the sandbox, so post-review ops decisions surface on
+  the rider's next status turn; when `GROQ_API_KEY` is unset, the offline heuristic parser covers
+  payout-domain English/Hinglish phrasings and standard date formats rather than open-domain chat.

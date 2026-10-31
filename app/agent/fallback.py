@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -13,13 +13,57 @@ from app.agent.contracts import (
 
 IST = ZoneInfo("Asia/Kolkata")
 TRIP_RE = re.compile(r"\bT\d+\b", re.IGNORECASE)
-AMOUNT_RE = re.compile(r"(?:₹|rs\.?|rupay|rupees?)\s*(\d+)|\b(\d+)\s*(?:rupay|rupees?)", re.I)
-DAY_RE = re.compile(r"\b([12]?\d|3[01])(?:st|nd|rd|th)?\b", re.I)
-GREETING_RE = re.compile(
-    r"(?:(?:ok|okay|okk|thik hai|theek hai|thanks|thank you|thankyou|thx|shukriya|dhanyavad|"
-    r"dhanyawad|ji|haan|hmm|great|good|👍|🙏)[\s\W]*)+",
+AMOUNT_RE = re.compile(
+    r"(?:₹|rs\.?|inr|rupay|rupaye|rupees?)\s*(\d+)|\b(\d+)\s*(?:rupay|rupaye|rupees?)",
     re.IGNORECASE,
 )
+DAY_RE = re.compile(r"\b([12]?\d|3[01])(?:st|nd|rd|th)?\b", re.I)
+GREETING_RE = re.compile(
+    r"(?:(?:hello|hi|hey|ok|okay|okk|thik hai|theek hai|thanks|thank you|thankyou|thx|"
+    r"shukriya|dhanyavad|dhanyawad|ji|haan|hmm|great|good|👍|🙏)[\s\W]*)+",
+    re.IGNORECASE,
+)
+DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
+HINGLISH_WORD_RE = re.compile(
+    r"\b(?:bhai|bhaiya|yaar|mera|meri|mere|mujhe|maine|humare|aapka|nahi|nhi|"
+    r"paisa|paise|rupay|rupaye|ko|ka|ki|ke|pe|aur|bhi|abhi|kab|kya|kyun|kaise|"
+    r"kitna|tarikh|wala|wali|wale|aaya|aaye|aayi|aayega|mila|mili|mile|kata|kaata|"
+    r"kiye|kiya|karo|kardo|karna|chahiye|galat|kam|zyada|dobara|baar|hai|hain|"
+    r"tha|thi|hua|hui|isliye|bahut|jaldi|turant|thik|theek|shukriya|dhanyavad|"
+    r"dhanyawad|ji|haan|kal|aaj|parso|laga|raha)\b",
+    re.IGNORECASE,
+)
+MONTH_MAP = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+MONTH_PATTERN = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+)
+ISO_DATE_RE = re.compile(r"\b(20\d{2})-(0?[1-9]|1[0-2])-(0?[1-9]|[12]\d|3[01])\b")
+DMY_SLASH_RE = re.compile(
+    r"\b(0?[1-9]|[12]\d|3[01])[/-](0?[1-9]|1[0-2])(?:[/-](20\d{2}|\d{2}))?\b"
+)
+DAY_MONTH_RE = re.compile(
+    rf"\b([12]?\d|3[01])(?:st|nd|rd|th)?\s+({MONTH_PATTERN})\b", re.IGNORECASE
+)
+MONTH_DAY_RE = re.compile(
+    rf"\b({MONTH_PATTERN})\.?\s+([12]?\d|3[01])(?:st|nd|rd|th)?\b", re.IGNORECASE
+)
+PARSO_RE = re.compile(r"\b(?:parso|day\s+before\s+yesterday)\b", re.IGNORECASE)
+YESTERDAY_RE = re.compile(r"\b(?:kal|yesterday)\b", re.IGNORECASE)
+TODAY_RE = re.compile(r"\b(?:aaj|today)\b", re.IGNORECASE)
 
 
 class HeuristicInterpretationProvider:
@@ -88,7 +132,17 @@ def build_fallback_payload(context: InterpretationContext) -> dict[str, Any]:
                     "kind": relation_kind,
                     "target_dispute_id": target,
                     "contradicts_prior": any(
-                        token in lowered for token in ("nahi nahi", "dobara", "wrong")
+                        token in lowered
+                        for token in (
+                            "nahi nahi",
+                            "dobara",
+                            "wrong",
+                            "recheck",
+                            "re-check",
+                            "check again",
+                            "disagree",
+                            "still incorrect",
+                        )
                     ),
                 },
                 "proposed_group": {
@@ -109,14 +163,18 @@ def build_fallback_payload(context: InterpretationContext) -> dict[str, Any]:
         message_intent = "mixed"
     return {
         "schema_version": "2.0.0",
-        "language": "hinglish"
-        if any(token in lowered for token in ("bhai", "nahi", "paisa", "ko "))
-        else "en",
+        "language": _detect_language(text, lowered),
         "message_intent": message_intent,
         "requested_status": requested_status,
         "safety_flags": safety,
         "complaints": complaints,
     }
+
+
+def _detect_language(text: str, lowered: str) -> str:
+    if DEVANAGARI_RE.search(text) or HINGLISH_WORD_RE.search(lowered):
+        return "hinglish"
+    return "en"
 
 
 def _first_pos(text: str, tokens: tuple[str, ...]) -> int | None:
@@ -126,16 +184,70 @@ def _first_pos(text: str, tokens: tuple[str, ...]) -> int | None:
 
 def _complaint_specs(text: str) -> list[tuple[str, str]]:
     positioned: list[tuple[int, str, str]] = []
-    if (pos := _first_pos(text, ("surge",))) is not None:
+    if (pos := _first_pos(text, ("surge", "peak pay", "peak bonus", "multiplier"))) is not None:
         positioned.append((pos, "surge", "Rider reports missing surge payment."))
-    if (pos := _first_pos(text, ("distance", " km"))) is not None and "got only" not in text:
-        positioned.append((pos, "distance", "Rider disputes the recorded trip distance."))
-    if (pos := _first_pos(text, ("incentive", "12 order", "12 se zyada"))) is not None:
+    distance_pos = _first_pos(
+        text,
+        (
+            "distance",
+            "wrong km",
+            "km wrong",
+            "km galat",
+            "km kam",
+            "route was longer",
+            "longer route",
+            "gps",
+        ),
+    )
+    if distance_pos is None and " km" in text and not any(
+        token in text
+        for token in ("got only", "received only", "paid only", "underpaid", "shortfall")
+    ):
+        distance_pos = text.find(" km")
+    if distance_pos is not None:
+        positioned.append((distance_pos, "distance", "Rider disputes the recorded trip distance."))
+    if (
+        pos := _first_pos(
+            text,
+            (
+                "incentive",
+                "daily bonus",
+                "target bonus",
+                "daily target",
+                "12 order",
+                "12 trip",
+                "12 deliver",
+                "12 rides",
+                "12 se zyada",
+                "completed 12",
+            ),
+        )
+    ) is not None:
         positioned.append((pos, "daily_incentive", "Rider reports a missing daily incentive."))
-    if (pos := _first_pos(text, ("penalty", "cancel"))) is not None:
+    if (pos := _first_pos(text, ("penalty", "cancel", "cancellation fee", "fine"))) is not None:
+        double_deduction = any(
+            token in text
+            for token in ("do baar", "2 baar", "twice", "double", "two times", "2 times")
+        )
         complaint_type = (
             "policy_exception"
-            if any(token in text for token in ("accident", "exception", "kyun"))
+            if not double_deduction
+            and any(
+                token in text
+                for token in (
+                    "accident",
+                    "exception",
+                    "kyun",
+                    "emergency",
+                    "medical",
+                    "puncture",
+                    "breakdown",
+                    "hospital",
+                    "waive",
+                    "not my fault",
+                    "wasn't my fault",
+                )
+            )
             else "cancellation_penalty"
         )
         positioned.append((pos, complaint_type, "Rider disputes a cancellation penalty."))
@@ -148,7 +260,35 @@ def _complaint_specs(text: str) -> list[tuple[str, str]]:
                 "payment nahi",
                 "paisa missing",
                 "paisa hi nahi",
+                "paisa kam",
+                "paisa nahi",
+                "paise kam",
+                "paise nahi",
+                "payment kam",
+                "payment galat",
                 "got only",
+                "received only",
+                "paid only",
+                "underpaid",
+                "shortfall",
+                "short paid",
+                "less payout",
+                "less money",
+                "wrong payout",
+                "incorrect payout",
+                "missing payout",
+                "payout missing",
+                "payment missing",
+                "not paid",
+                "not received",
+                "didn't get",
+                "did not get",
+                "didn't receive",
+                "did not receive",
+                "unpaid",
+                "missing fare",
+                "fare missing",
+                "wrong fare",
                 "payout kam",
                 "payout galat",
                 "payout 5000",
@@ -157,59 +297,158 @@ def _complaint_specs(text: str) -> list[tuple[str, str]]:
         and not specs
     ):
         specs.append(("trip_payment", "Rider reports a missing or incorrect trip payout."))
-    if any(token in text for token in ("dobara check", "record", "galat laga")) and not specs:
+    if (
+        any(
+            token in text
+            for token in (
+                "dobara check",
+                "record",
+                "galat laga",
+                "recheck",
+                "re-check",
+                "check again",
+                "still wrong",
+                "disagree",
+                "incorrect count",
+            )
+        )
+        and not specs
+    ):
         specs.append(("record_disagreement", "Rider disagrees with the recorded result."))
     return specs
 
 
 NOT_A_DAY_AFTER_RE = re.compile(
-    r"\s*(?:\.\d|order|trip|rupay|rupaye|rupees?|rs\b|₹|kiye|kiya|baar|"
-    r"km\b|kms\b|x\b|%|se\s+zyada|complete)",
+    r"\s*(?:\.\d|-\s*\d|order|trip|deliver(?:y|ies)|rides?|rupay|rupaye|rupees?|rs\b|₹|"
+    r"kiye|kiya|baar|times?\b|km\b|kms\b|x\b|%|se\s+zyada|complete|hrs?\b|hours?\b|"
+    r"mins?\b|minutes?\b|days?\b|am\b|pm\b)",
     re.IGNORECASE,
 )
-NOT_A_DAY_BEFORE_RE = re.compile(r"(?:₹|rs\.?|rupay|rupees?)\s*$|[.,:/\d]$", re.IGNORECASE)
+NOT_A_DAY_BEFORE_RE = re.compile(
+    r"(?:₹|rs\.?|inr|rupay|rupaye|rupees?)\s*$|[.,:/\d-]$",
+    re.IGNORECASE,
+)
 WALA_AFTER_RE = re.compile(r"\s*wal[aei]\b", re.IGNORECASE)
+
+
+def _overlaps(span: tuple[int, int], spans: list[tuple[int, int]]) -> bool:
+    return any(span[0] < end and start < span[1] for start, end in spans)
+
+
+def _infer_month_day(reference: date, month: int, day: int, year: int | None = None) -> date | None:
+    if year is not None:
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return None
+    for candidate_year in (reference.year, reference.year - 1):
+        try:
+            candidate = date(candidate_year, month, day)
+        except ValueError:
+            continue
+        if candidate <= reference + timedelta(days=1) or candidate_year == reference.year - 1:
+            return candidate
+    return None
 
 
 def _dates(text: str, context: InterpretationContext) -> list[str]:
     received = context.envelope.received_at.astimezone(IST)
-    if re.search(r"\bkal\b", text):
-        return [(received.date() - timedelta(days=1)).isoformat()]
-    if re.search(r"\baaj\b", text):
-        return [received.date().isoformat()]
-    if re.search(r"\bparso\b", text):
-        return [(received.date() - timedelta(days=2)).isoformat()]
+    ref_date = received.date()
+    matched_spans: list[tuple[int, int]] = []
+    explicit_positioned: list[tuple[int, str]] = []
+
+    for match in ISO_DATE_RE.finditer(text):
+        span = match.span()
+        parsed = _infer_month_day(
+            ref_date, int(match.group(2)), int(match.group(3)), int(match.group(1))
+        )
+        if parsed is not None:
+            matched_spans.append(span)
+            explicit_positioned.append((span[0], parsed.isoformat()))
+
+    for match in DMY_SLASH_RE.finditer(text):
+        span = match.span()
+        if _overlaps(span, matched_spans):
+            continue
+        following = text[span[1] : span[1] + 16]
+        preceding = text[max(0, span[0] - 10) : span[0]]
+        if NOT_A_DAY_AFTER_RE.match(following) or NOT_A_DAY_BEFORE_RE.search(preceding):
+            continue
+        day_val, month_val = int(match.group(1)), int(match.group(2))
+        year_raw = match.group(3)
+        sep = text[match.end(1)]
+        if sep == "-" and year_raw is None and len(match.group(2)) < 2:
+            # Bare "2-3" or "10-11" without a zero-padded month or year is usually a numeric range.
+            continue
+        if (day_val, month_val) == (24, 7) and year_raw is None:
+            continue
+        year_val = (
+            (int(year_raw) + 2000 if len(year_raw) == 2 else int(year_raw))
+            if year_raw
+            else None
+        )
+        parsed = _infer_month_day(ref_date, month_val, day_val, year_val)
+        if parsed is not None:
+            matched_spans.append(span)
+            explicit_positioned.append((span[0], parsed.isoformat()))
+
+    for regex, day_group, month_group in ((DAY_MONTH_RE, 1, 2), (MONTH_DAY_RE, 2, 1)):
+        for match in regex.finditer(text):
+            span = match.span()
+            if _overlaps(span, matched_spans):
+                continue
+            month_val = MONTH_MAP[match.group(month_group)[:3].lower()]
+            parsed = _infer_month_day(ref_date, month_val, int(match.group(day_group)))
+            if parsed is not None:
+                matched_spans.append(span)
+                explicit_positioned.append((span[0], parsed.isoformat()))
+
+    relative_positioned: list[tuple[int, str]] = []
+    for regex, delta_days in ((PARSO_RE, 2), (YESTERDAY_RE, 1), (TODAY_RE, 0)):
+        for match in regex.finditer(text):
+            span = match.span()
+            if _overlaps(span, matched_spans):
+                continue
+            matched_spans.append(span)
+            iso_val = (ref_date - timedelta(days=delta_days)).isoformat()
+            relative_positioned.append((span[0], iso_val))
+
+    if relative_positioned and not explicit_positioned:
+        relative_positioned.sort(key=lambda item: item[0])
+        return list(dict.fromkeys(value for _, value in relative_positioned))
+
     # "10 wala" is ambiguous: "the ₹10 one" when an open dispute carries that amount,
     # otherwise "the 10th's" (a date).
     open_amounts = {
         int(item["amount"]) for item in context.open_disputes if item.get("amount") is not None
     }
-    days = []
+    bare_positioned: list[tuple[int, str]] = []
     for match in DAY_RE.finditer(text):
-        following = text[match.end() : match.end() + 14]
-        preceding = text[max(0, match.start() - 8) : match.start()]
+        span = match.span()
+        if _overlaps(span, matched_spans):
+            continue
+        following = text[match.end() : match.end() + 16]
+        preceding = text[max(0, match.start() - 10) : match.start()]
         if NOT_A_DAY_AFTER_RE.match(following) or NOT_A_DAY_BEFORE_RE.search(preceding):
-            # "12 kiye the", "2 baar", "7.4 km", "Rs 25", "20/9" are not dates.
             continue
-        if WALA_AFTER_RE.match(following) and int(match.group(1)) in open_amounts:
+        day = int(match.group(1))
+        if WALA_AFTER_RE.match(following) and day in open_amounts:
             continue
-        days.append(int(match.group(1)))
-    dates: list[str] = []
-    for day in days:
         try:
-            candidate = received.date().replace(day=day)
+            candidate = ref_date.replace(day=day)
         except ValueError:
             continue
-        if candidate > received.date() + timedelta(days=1):
+        if candidate > ref_date + timedelta(days=1):
             previous_month = (received.replace(day=1) - timedelta(days=1)).date()
             try:
                 candidate = previous_month.replace(day=day)
             except ValueError:
                 continue
-        value = candidate.isoformat()
-        if value not in dates:
-            dates.append(value)
-    return dates
+        bare_positioned.append((span[0], candidate.isoformat()))
+
+    combined = explicit_positioned + relative_positioned + bare_positioned
+    combined.sort(key=lambda item: item[0])
+    return list(dict.fromkeys(value for _, value in combined))
 
 
 def _amount(text: str) -> int | None:
@@ -221,7 +460,20 @@ def _amount(text: str) -> int | None:
 
 
 def _requested_status(text: str) -> str:
-    if any(token in text for token in ("kab tak", "status", "aayega")):
+    if any(
+        token in text
+        for token in (
+            "kab tak",
+            "status",
+            "aayega",
+            "kitna time",
+            "when will",
+            "where is my payout",
+            "where is my payment",
+            "any update",
+            "still waiting",
+        )
+    ):
         return "payment"
     if "approve" in text or "approval" in text:
         return "approval"

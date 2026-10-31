@@ -32,7 +32,7 @@ class GroqInterpretationProvider:
         *,
         client: httpx.Client | None = None,
     ) -> None:
-        if settings.groq_api_key is None:
+        if not settings.has_groq_api_key or settings.groq_api_key is None:
             raise ValueError("GROQ_API_KEY is required for the Groq provider")
         self.settings = settings
         self.prompt = settings.model_prompt_path.read_text(encoding="utf-8")
