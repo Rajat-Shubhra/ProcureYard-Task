@@ -28,6 +28,7 @@ def create_app(
     *,
     database: Database | None = None,
     readiness_probe: ReadinessProbe | None = None,
+    payswift_client: PaySwiftClient | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     settings.validate_api_runtime()
@@ -38,7 +39,7 @@ def create_app(
         worker_name=WORKER_NAME,
         heartbeat_ttl_seconds=settings.worker_heartbeat_ttl_seconds,
     )
-    payswift_client = PaySwiftClient(settings)
+    payswift_client = payswift_client or PaySwiftClient(settings)
     conversation_service = ConversationService(
         database,
         settings,

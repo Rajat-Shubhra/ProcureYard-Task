@@ -15,6 +15,11 @@ IST = ZoneInfo("Asia/Kolkata")
 TRIP_RE = re.compile(r"\bT\d+\b", re.IGNORECASE)
 AMOUNT_RE = re.compile(r"(?:₹|rs\.?|rupay|rupees?)\s*(\d+)|\b(\d+)\s*(?:rupay|rupees?)", re.I)
 DAY_RE = re.compile(r"\b([12]?\d|3[01])(?:st|nd|rd|th)?\b", re.I)
+GREETING_RE = re.compile(
+    r"(?:(?:ok|okay|okk|thik hai|theek hai|thanks|thank you|thankyou|thx|shukriya|dhanyavad|"
+    r"dhanyawad|ji|haan|hmm|great|good|👍|🙏)[\s\W]*)+",
+    re.IGNORECASE,
+)
 
 
 class HeuristicInterpretationProvider:
@@ -42,13 +47,22 @@ def build_fallback_payload(context: InterpretationContext) -> dict[str, Any]:
     amount = _amount(text)
     open_disputes = context.open_disputes
 
-    if not complaint_specs and open_disputes and requested_status == "not_applicable":
+    greeting_only = bool(GREETING_RE.fullmatch(lowered.strip()))
+    if greeting_only:
+        complaint_specs = []
+    elif not complaint_specs and open_disputes and requested_status == "not_applicable":
         complaint_specs = [("unknown", "Follow-up on an existing payout complaint.")]
 
     complaints: list[dict[str, Any]] = []
     for index, (complaint_type, summary) in enumerate(complaint_specs):
         service_date = service_dates[min(index, len(service_dates) - 1)] if service_dates else None
-        target = _follow_up_target(open_disputes, complaint_type, amount)
+        target = _follow_up_target(
+            open_disputes,
+            complaint_type,
+            service_date=service_date,
+            trip_ids=trip_ids,
+            amount=amount,
+        )
         if target and complaint_type == "unknown":
             prior = next(item for item in open_disputes if item.get("dispute_id") == target)
             complaint_type = str(prior.get("dispute_type") or "unknown")
@@ -87,7 +101,9 @@ def build_fallback_payload(context: InterpretationContext) -> dict[str, Any]:
         )
 
     message_intent = "status_request" if requested_status != "not_applicable" else "new_complaint"
-    if open_disputes and complaints:
+    if greeting_only:
+        message_intent = "greeting_or_thanks"
+    elif any(item["relation"]["kind"] != "new" for item in complaints):
         message_intent = "follow_up"
     if len(complaints) > 1:
         message_intent = "mixed"
@@ -103,21 +119,28 @@ def build_fallback_payload(context: InterpretationContext) -> dict[str, Any]:
     }
 
 
+def _first_pos(text: str, tokens: tuple[str, ...]) -> int | None:
+    positions = [pos for token in tokens if (pos := text.find(token)) >= 0]
+    return min(positions) if positions else None
+
+
 def _complaint_specs(text: str) -> list[tuple[str, str]]:
-    specs: list[tuple[str, str]] = []
-    if "surge" in text:
-        specs.append(("surge", "Rider reports missing surge payment."))
-    if any(token in text for token in ("distance", " km")) and "got only" not in text:
-        specs.append(("distance", "Rider disputes the recorded trip distance."))
-    if any(token in text for token in ("incentive", "12 order", "12 se zyada")):
-        specs.append(("daily_incentive", "Rider reports a missing daily incentive."))
-    if "penalty" in text or "cancel" in text:
+    positioned: list[tuple[int, str, str]] = []
+    if (pos := _first_pos(text, ("surge",))) is not None:
+        positioned.append((pos, "surge", "Rider reports missing surge payment."))
+    if (pos := _first_pos(text, ("distance", " km"))) is not None and "got only" not in text:
+        positioned.append((pos, "distance", "Rider disputes the recorded trip distance."))
+    if (pos := _first_pos(text, ("incentive", "12 order", "12 se zyada"))) is not None:
+        positioned.append((pos, "daily_incentive", "Rider reports a missing daily incentive."))
+    if (pos := _first_pos(text, ("penalty", "cancel"))) is not None:
         complaint_type = (
             "policy_exception"
             if any(token in text for token in ("accident", "exception", "kyun"))
             else "cancellation_penalty"
         )
-        specs.append((complaint_type, "Rider disputes a cancellation penalty."))
+        positioned.append((pos, complaint_type, "Rider disputes a cancellation penalty."))
+    positioned.sort(key=lambda item: item[0])
+    specs = [(kind, summary) for _, kind, summary in positioned]
     if (
         any(
             token in text
@@ -139,14 +162,36 @@ def _complaint_specs(text: str) -> list[tuple[str, str]]:
     return specs
 
 
+NOT_A_DAY_AFTER_RE = re.compile(
+    r"\s*(?:\.\d|order|trip|rupay|rupaye|rupees?|rs\b|₹|kiye|kiya|baar|"
+    r"km\b|kms\b|x\b|%|se\s+zyada|complete)",
+    re.IGNORECASE,
+)
+NOT_A_DAY_BEFORE_RE = re.compile(r"(?:₹|rs\.?|rupay|rupees?)\s*$|[.,:/\d]$", re.IGNORECASE)
+WALA_AFTER_RE = re.compile(r"\s*wal[aei]\b", re.IGNORECASE)
+
+
 def _dates(text: str, context: InterpretationContext) -> list[str]:
     received = context.envelope.received_at.astimezone(IST)
-    if "kal" in text:
+    if re.search(r"\bkal\b", text):
         return [(received.date() - timedelta(days=1)).isoformat()]
+    if re.search(r"\baaj\b", text):
+        return [received.date().isoformat()]
+    if re.search(r"\bparso\b", text):
+        return [(received.date() - timedelta(days=2)).isoformat()]
+    # "10 wala" is ambiguous: "the ₹10 one" when an open dispute carries that amount,
+    # otherwise "the 10th's" (a date).
+    open_amounts = {
+        int(item["amount"]) for item in context.open_disputes if item.get("amount") is not None
+    }
     days = []
     for match in DAY_RE.finditer(text):
-        following = text[match.end() : match.end() + 10]
-        if re.match(r"\s*(?:order|trip)", following):
+        following = text[match.end() : match.end() + 14]
+        preceding = text[max(0, match.start() - 8) : match.start()]
+        if NOT_A_DAY_AFTER_RE.match(following) or NOT_A_DAY_BEFORE_RE.search(preceding):
+            # "12 kiye the", "2 baar", "7.4 km", "Rs 25", "20/9" are not dates.
+            continue
+        if WALA_AFTER_RE.match(following) and int(match.group(1)) in open_amounts:
             continue
         days.append(int(match.group(1)))
     dates: list[str] = []
@@ -157,7 +202,10 @@ def _dates(text: str, context: InterpretationContext) -> list[str]:
             continue
         if candidate > received.date() + timedelta(days=1):
             previous_month = (received.replace(day=1) - timedelta(days=1)).date()
-            candidate = previous_month.replace(day=day)
+            try:
+                candidate = previous_month.replace(day=day)
+            except ValueError:
+                continue
         value = candidate.isoformat()
         if value not in dates:
             dates.append(value)
@@ -190,12 +238,51 @@ def _safety_flags(text: str, envelope_rider_id: str) -> list[str]:
     return flags or ["none"]
 
 
+def _is_compatible_follow_up(
+    candidate: dict[str, Any],
+    complaint_type: str,
+    service_date: str | None,
+    trip_ids: tuple[str, ...],
+) -> bool:
+    prior_type = candidate.get("dispute_type")
+    if complaint_type not in {"unknown", "record_disagreement"} and prior_type not in {
+        None,
+        "unknown",
+        complaint_type,
+    }:
+        return False
+    prior_date = candidate.get("service_date_ist")
+    if service_date is not None and prior_date is not None and prior_date != service_date:
+        return False
+    prior_trips = tuple(str(value) for value in candidate.get("trip_ids") or ())
+    if trip_ids:
+        if prior_trips:
+            if set(trip_ids).isdisjoint(prior_trips):
+                return False
+        elif candidate.get("state") not in {"draft", "needs_clarification"}:
+            return False
+    return True
+
+
 def _follow_up_target(
     open_disputes: tuple[dict[str, Any], ...],
     complaint_type: str,
-    amount: int | None,
+    *,
+    service_date: str | None = None,
+    trip_ids: tuple[str, ...] = (),
+    amount: int | None = None,
 ) -> str | None:
-    candidates = list(open_disputes)
+    candidates = [
+        item
+        for item in open_disputes
+        if _is_compatible_follow_up(item, complaint_type, service_date, trip_ids)
+    ]
+    if not candidates:
+        return None
+    if complaint_type == "record_disagreement":
+        explained = [item for item in candidates if item.get("state") == "resolved_explained"]
+        if len(explained) == 1:
+            return str(explained[0]["dispute_id"])
     if complaint_type != "unknown":
         typed = [item for item in candidates if item.get("dispute_type") == complaint_type]
         if len(typed) == 1:

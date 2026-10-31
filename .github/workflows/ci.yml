@@ -34,7 +34,7 @@ jobs:
           DATABASE_URL: sqlite+pysqlite:///migration-check.db
           APP_ENV: test
           LLM_PROVIDER: fake
-        run: alembic upgrade head && alembic check && alembic heads
+        run: alembic upgrade head && alembic check && test "$(alembic heads | wc -l)" -eq 1
 
       - name: Prepare Compose environment
         run: cp .env.example .env && sed -i 's/^LLM_PROVIDER=.*/LLM_PROVIDER=fake/' .env
@@ -54,13 +54,54 @@ jobs:
             fi
             sleep 2
           done
-          docker compose logs
           exit 1
 
       - name: Black-box duplicate-delivery smoke eval
-        run: python evals/run.py http://localhost:8000 --case 4 --poll-seconds 15
+        run: python evals/run.py http://localhost:8000 --case 4 --poll-seconds 40
+
+      - name: Compose logs
+        if: failure()
+        run: docker compose ps -a && docker compose logs --no-color --timestamps
 
       - name: Stop stack
         if: always()
         run: docker compose down --volumes
 
+  # The authoritative eval: every conversation in data/conversations.json runs against a freshly
+  # recreated stack (data/README.md: "Run each conversation against a fresh system"), with the real
+  # PaySwift sandbox and its chaos left on, like production. The runner's own health wait handles
+  # readiness after each reset.
+  evals-full:
+    name: Black-box evals, fresh stack per case
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install eval runner dependency
+        run: python -m pip install --upgrade pip && pip install "httpx>=0.28,<1"
+
+      - name: Prepare Compose environment
+        run: cp .env.example .env && sed -i 's/^LLM_PROVIDER=.*/LLM_PROVIDER=fake/' .env
+
+      - name: Build images
+        run: docker compose build
+
+      - name: Run all conversations
+        run: >
+          python evals/run.py http://localhost:8000
+          --reset-cmd 'docker compose down --volumes --remove-orphans && docker compose up --detach'
+          --poll-seconds 40 --max-turn-seconds 9
+
+      - name: Compose logs
+        if: failure()
+        run: docker compose ps -a && docker compose logs --no-color --timestamps
+
+      - name: Stop stack
+        if: always()
+        run: docker compose down --volumes --remove-orphans

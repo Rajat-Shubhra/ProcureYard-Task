@@ -8,10 +8,18 @@ separately at the end.
 - Per-trip fare uses `25 + 6 * max(km - 2, 0)`, surge on the full fare, and per-trip `ROUND_HALF_UP`.
 - Rider cancellation is −₹10; customer cancellation is zero.
 - Daily incentive is ₹150 at 12 completed logical trips on an IST service date.
-- Actual trip, incentive, and penalty lines are reconciled into `max(expected - actual, 0)`.
+- Actual trip, incentive, and penalty lines are reconciled into `max(expected - actual, 0)`, and
+  money already queued, paid (locally or only in PaySwift) or awaiting approval for the same
+  evidence is deducted before any new decision (Gate B rule 9, `app/domain/coverage.py`).
 - Ownership, source completeness, and the received-date plus previous-six-IST-dates window are
-  explicit evaluation fields. Alleged rider amounts never enter the calculation.
-- Date/cause grouping works after source trip deduplication and normalization.
+  explicit evaluation fields. The window is decided by the trips' own IST service date; a
+  rider-claimed date is only traced (`claimed_date_mismatch`). Alleged rider amounts never enter
+  the calculation.
+- Date/cause grouping works after source trip deduplication and normalization. The ₹200
+  automatic limit is cumulative per rider, IST service date and cause family, so a shortfall
+  cannot be split across messages to stay under it.
+- Unclear or shady cases (cross-account trip, disputed records, distance or policy-exception
+  requests, conflicting source rows) create ops escalations with a null amount.
 
 ## Phase 4 — conversation and multi-complaint model adapter
 

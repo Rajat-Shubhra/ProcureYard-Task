@@ -111,6 +111,8 @@ Never return 5xx merely because a payout provider call is slow after the message
 - `GET /ops`: server-rendered pending/conversation/trace page.
 - `POST /ops/items/{id}/approve`: approve a pending approval only.
 - `POST /ops/items/{id}/reject`: reject a pending approval or close an escalation.
+- `POST /ops/items/{id}/retry-payout`: re-queue the retained payout intent behind a
+  `provider-failure:*` escalation (same idempotency key, body and reference).
 
 Mutation request:
 
@@ -124,8 +126,10 @@ Mutation request:
 Rules:
 
 - Mutations are idempotent for the same terminal decision.
-- A different second terminal decision returns 409.
-- Approval reruns the complete deterministic action gate and PaySwift reconciliation. A stale/already-paid item closes without another payout.
+- A different second terminal decision returns 409 (`conflict`).
+- Approval reruns the complete deterministic action gate against the evidence that produced the
+  approval and reconciles against local payout intents and the PaySwift ledger (Gate B rule 9). A
+  stale/already-paid item closes with HTTP 200 and `status: "closed_stale"` without another payout.
 - Unknown item returns 404.
 - Attempting to approve an escalation without first establishing a new verified amount returns 409.
 - Authentication is outside the assignment's fixed interface and is deferred as a documented production hardening item; do not place a secret requirement on evaluator-facing GET endpoints.
@@ -143,14 +147,17 @@ Rules:
 }
 ```
 
+Every error response also carries the `x-trace-id` header.
+
 Frozen codes:
 
 - `invalid_json`
 - `validation_error`
 - `not_found`
 - `conflict`
+- `invalid_request` (other client errors, e.g. 405)
 - `service_not_ready`
 - `database_unavailable`
-- `internal_error`
+- `internal_error` (always HTTP 503, `retryable: true`)
 
 Provider-specific errors are mapped to internal trace reason codes and are not exposed raw to riders.

@@ -1,60 +1,67 @@
 # QuickDrop Rider Payout Dispute Desk
 
-Production-shaped FastAPI service for WhatsApp-style payout disputes. It preserves every source
-row, extracts multiple complaints independently, computes policy outcomes deterministically,
-blocks unsafe model proposals with non-LLM gates, and moves money through a durable PaySwift
-outbox.
+FastAPI service for WhatsApp-style payout disputes. It preserves every source row, extracts
+complaints with a strict-schema model (or a deterministic parser), computes policy outcomes in
+code, blocks unsafe proposals with non-LLM gates, and moves money through a durable PaySwift outbox.
 
 ## Run
 
 ```bash
-cp .env.example .env
-# add GROQ_API_KEY, or set LLM_PROVIDER=fake for deterministic/offline behavior
-docker compose up --build
+docker compose up --build   # works on a clean clone: no .env needed, deterministic fake LLM
+# real model: cp .env.example .env, set LLM_PROVIDER=groq and GROQ_API_KEY, run again
 ```
 
-The API is on `http://localhost:8000`, ops UI on `http://localhost:8000/ops`, and PaySwift on
-`http://localhost:8081`. Startup order is Postgres → migrations → idempotent source import → API
-and worker. `GET /health` becomes 200 only after imported data and a fresh worker heartbeat exist.
-All configuration is listed in `.env.example`; `.env` is ignored.
+API `http://localhost:8000`, ops UI `http://localhost:8000/ops` (pending table → item page with the
+conversation, evidence, trace and approve/reject/retry buttons), PaySwift `http://localhost:8081`.
+Startup: Postgres → migrations → idempotent import → API + worker; `GET /health` is 200 only after
+imported data and a fresh worker heartbeat exist. All settings are in `.env.example` (`.env` optional).
 
-Required interfaces:
+## Design: what the model decides, what code decides
 
-- `POST /messages` — durable/idempotent rider message handling; returns at least `{"reply":"..."}`.
-- `GET /trace/{rider_id}` — ordered message/tool/decision/error/reply audit.
-- `GET /ops/pending` — pending approvals and necessary escalations.
-- `POST /ops/items/{id}/approve|reject` — idempotent human review with full gate revalidation.
+- **Model (Groq, strict JSON schema v2, no tools/streaming):** language, intent, one entry per
+  complaint (type, date words, trip ids, alleged amount, grounding, link to a prior dispute),
+  safety flags. A deterministic parser replaces it offline/on failure.
+- **Code evidence reads (no model involved):** rider roster, the rider's trips by IST date or by
+  trip id, paid payout lines, entitlement calculation, the PaySwift ledger, open actions.
+- **Code decides everything about money:** identity (envelope `rider_id`), ownership, IST dates,
+  7-day window from the trip's own service date, fare/incentive/penalty arithmetic, shortfall
+  `max(expected − actual, 0)`, deduction of anything already queued/paid/awaiting approval for the
+  same evidence (local intents **and** the PaySwift ledger), the ₹200 cumulative limit and one
+  auto-pay per rider per IST day, approval vs escalation, idempotency keys, retries, and the final
+  reply check (Gate C). Human approval re-runs the same gate against the original evidence.
 
-## Safety design
+## Assumptions
 
-- Groq receives only the v2 extraction schema and strict prompt. Each complaint has its own date,
-  trips, alleged amount, grounding, prior-dispute relation, and grouping proposal. It cannot emit a
-  payment or approval.
-- Runtime recomputes grouping, IST dates, ownership, seven-day eligibility, per-trip half-up fare,
-  incentive, cancellation result, and actual shortfall from normalized evidence.
-- Gate A validates extraction; Gate B validates every action and exact amount; Gate C scans the
-  literal reply for unsupported riders, trips, amounts, or paid/approved/escalated claims.
-- Auto-pay is ≤₹200 once per rider/IST action day. Known blocked amounts become approvals; unclear
-  facts become escalations only when human investigation is actually necessary.
-- Payout intents, immutable fingerprints, idempotency keys, attempts, leases, retries, and ledger
-  reconciliation are persisted before/around provider calls. Ambiguous responses never prove
-  failure and never change key/body on retry.
+- "Last 7 days" = the message's IST date plus the previous six IST dates; trip evidence decides the
+  date, a rider-claimed date is only traced. Days are IST; `started_at` is UTC in the export.
+- Distances > 100 are metres (÷1000, must land in 0.1–100 km); `R7`/`r19` map to `R007`/`R019`
+  only with a unique roster match; byte-identical duplicate trip rows are one trip, conflicting
+  rows are rejected and escalate. Every normalization is traced.
+- The payout export is the historical baseline; PaySwift is authoritative for new money. No
+  automatic clawback of overpayments. Ops authentication is deferred (evaluator GETs must stay open).
 
 ## Verify
 
 ```bash
-pip install -e ".[dev]"
-ruff check .
-pytest --cov=app --cov-report=term-missing
-python evals/run.py http://localhost:8000
-# authoritative isolated case: restart a clean stack, then add --case N
+pip install -e ".[dev]" && ruff check . && pytest --cov=app --cov-report=term-missing   # 190+ tests
+python evals/run.py http://localhost:8000 \
+  --reset-cmd 'docker compose down --volumes && docker compose up --detach' --poll-seconds 40
+python evals/run.py http://localhost:8000   # quick smoke on a running stack: NON-AUTHORITATIVE
 ```
 
-The automated suite covers all 24 supplied scenarios on isolated databases, duplicate messages,
-multiple complaints, revisions, source anomalies, action/reply gate attacks, migration parity, and
-lost PaySwift responses recovered through ledger reconciliation. Docker Compose and one black-box
-case run in GitHub Actions.
+`evals/run.py` is black-box (`POST /messages`, `GET /trace`, `GET /ops/pending`, `GET /health`,
+PaySwift `GET /v1/payouts`). Per case it replays rider turns, polls until the expected
+`(payout, approval)` end state holds, and checks escalation, `reply_mentions`, trace shape and
+per-turn latency (`--max-turn-seconds`, default 9 s; p95 reported). **Results:** isolated mode
+(fresh stack per case) 24/24 pass, p95 turn latency 63 ms on the in-process harness; shared-stack
+mode 23/24 (case 04 re-asks about a trip case 00 already paid and is correctly reconciled instead of
+paid again — hence NON-AUTHORITATIVE). CI runs lint, tests, migration parity, a Compose smoke case
+and a second job that runs all 24 conversations against a recreated stack with PaySwift chaos on.
 
-Known submission-only tasks: export the raw Codex/ChatGPT session into `ai-logs/`, push the final
-reviewed commit to a new private repository on `main`, and add `Sarthak-pyard`. These external
-account actions are intentionally not fabricated by the application.
+## Skipped / known limits
+
+- No ops authentication; no outbound rider notification channel (ops decisions surface on the
+  rider's next status question); reply templates are Hinglish-first; the deterministic parser
+  handles the supplied phrasings, not open-ended language.
+- `ai-logs/` must contain the raw AI session exports before submission; add `Sarthak-pyard` to the
+  private repo. These are account actions, not application behaviour.

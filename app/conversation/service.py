@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from dataclasses import asdict, dataclass, replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import httpx
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -26,9 +28,11 @@ from app.agent.provider import (
     InterpretationProviderError,
 )
 from app.config import Settings
-from app.db import Database
+from app.db import Database, lock_rider
+from app.domain.coverage import CommitmentSummary, logical_reference, summarize_commitments
 from app.domain.decision import DecisionPlan, plan_decision
 from app.domain.payout import DisputeEvaluation, PayoutPolicyEngine
+from app.errors import RetryableProcessingError
 from app.gates.action import ActionGate, ActionProposal
 from app.gates.interpretation import InterpretationGate
 from app.gates.reply import ReplyGate, ReplyProposal
@@ -42,6 +46,7 @@ from app.models import (
     Evidence,
     Message,
     MessageInterpretation,
+    NormalizedTrip,
     OpsItem,
     PayoutIntent,
     Rider,
@@ -49,7 +54,12 @@ from app.models import (
 from app.providers.payswift import PaySwiftClient, payout_request_fingerprint
 from app.trace import add_trace_event
 
+logger = logging.getLogger(__name__)
+
 IST = ZoneInfo("Asia/Kolkata")
+# Disputes a later turn may refer to. Paid/explained/rejected disputes stay linkable so a
+# re-sent or rephrased complaint is reconciled against the existing action instead of
+# opening a parallel dispute (CONVERSATION_WORKFLOW §4).
 OPEN_DISPUTE_STATES = {
     "draft",
     "needs_clarification",
@@ -58,7 +68,23 @@ OPEN_DISPUTE_STATES = {
     "awaiting_approval",
     "escalated",
     "payout_processing",
+    "paid",
+    "resolved_explained",
+    "rejected",
 }
+# States in which a new accepted complaint may re-open verification of an existing dispute.
+REVERIFIABLE_DISPUTE_STATES = {
+    "draft",
+    "needs_clarification",
+    "verifying",
+    "verified_owed",
+    "resolved_explained",
+    "error",
+}
+# A message that stays in ``processing`` this long without a reply is considered abandoned
+# (crash after durable receipt) and is resumed by the next vendor delivery.
+PROCESSING_RESUME_AFTER = timedelta(seconds=20)
+CONCURRENT_DUPLICATE_WAIT_SECONDS = 1.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +106,7 @@ class Outcome:
     provider_confirmed: bool = False
     approval_pending: bool = False
     escalation_pending: bool = False
+    status_note: str = ""
 
 
 class ConversationService:
@@ -107,20 +134,44 @@ class ConversationService:
         if isinstance(reserved, MessageResult):
             return reserved
         conversation_id, turn_number = reserved
+        try:
+            return self._process_reserved(envelope, conversation_id, turn_number)
+        except RetryableProcessingError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - converted into a retryable, traced failure
+            self._record_processing_failure(envelope, conversation_id, exc)
+            raise RetryableProcessingError(
+                f"message {envelope.message_id} processing failed: {type(exc).__name__}"
+            ) from exc
+
+    def _process_reserved(
+        self, envelope: MessageEnvelope, conversation_id: str, turn_number: int
+    ) -> MessageResult:
         context = self._load_context(envelope, conversation_id)
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="message-io") as executor:
             interpretation_future = executor.submit(self.provider.interpret, context)
             ledger_future = executor.submit(self.payswift.list_payouts, envelope.rider_id)
             try:
                 interpretation = interpretation_future.result()
-            except (InterpretationProviderError, httpx.HTTPError, ValueError):
+            except Exception as exc:  # noqa: BLE001 - any provider failure degrades safely
+                if not isinstance(
+                    exc, InterpretationProviderError | httpx.HTTPError | ValueError
+                ):
+                    logger.warning(
+                        "model_provider_unexpected_error",
+                        extra={"error_type": type(exc).__name__},
+                    )
                 if not self.settings.model_fallback_enabled:
                     return self._model_failure(envelope, conversation_id)
-                interpretation = self.fallback.interpret(context)
+                try:
+                    interpretation = self.fallback.interpret(context)
+                except Exception:  # noqa: BLE001 - the fail-safe parser must never 5xx
+                    logger.exception("fallback_interpretation_failed")
+                    return self._model_failure(envelope, conversation_id)
             try:
                 ledger = ledger_future.result()
                 ledger_ok = True
-            except httpx.HTTPError:
+            except (httpx.HTTPError, ValueError):
                 ledger = []
                 ledger_ok = False
         return self._persist_and_decide(
@@ -132,6 +183,31 @@ class ConversationService:
             ledger_ok,
         )
 
+    def _record_processing_failure(
+        self, envelope: MessageEnvelope, conversation_id: str, exc: Exception
+    ) -> None:
+        logger.exception(
+            "message_processing_failed",
+            extra={"message_id": envelope.message_id, "error_type": type(exc).__name__},
+        )
+        try:
+            with self.database.session() as session, session.begin():
+                add_trace_event(
+                    session,
+                    rider_id=envelope.rider_id,
+                    conversation_id=conversation_id,
+                    message_id=envelope.message_id,
+                    event_type="error",
+                    name="processing_failed",
+                    input_payload={"message_id": envelope.message_id},
+                    output_payload={
+                        "error_type": type(exc).__name__,
+                        "resume": "next vendor delivery resumes this message",
+                    },
+                )
+        except Exception:  # noqa: BLE001 - tracing must not mask the original failure
+            logger.exception("processing_failure_trace_not_written")
+
     def _build_provider(self) -> InterpretationProvider:
         if self.settings.llm_provider == "groq":
             return GroqInterpretationProvider(self.settings)
@@ -141,17 +217,37 @@ class ConversationService:
         try:
             return self._reserve_once(envelope)
         except IntegrityError:
+            # Concurrent delivery lost the insert race: wait briefly for the owner's reply.
+            return self._duplicate_result(envelope, wait=True)
+
+    def _duplicate_result(self, envelope: MessageEnvelope, *, wait: bool) -> MessageResult:
+        deadline = time.monotonic() + (CONCURRENT_DUPLICATE_WAIT_SECONDS if wait else 0)
+        while True:
             with self.database.session() as session:
                 existing = session.get(Message, envelope.message_id)
                 if existing is None:
-                    raise
-                return MessageResult(
-                    reply=existing.reply or "Aapka message process ho raha hai.",
-                    message_id=existing.message_id,
-                    conversation_id=existing.conversation_id,
-                    state=existing.status,
-                    duplicate=True,
-                )
+                    raise RuntimeError("duplicate message vanished during reservation")
+                if existing.rider_id != envelope.rider_id:
+                    # D-005: a reused vendor id from another number must never replay
+                    # the first rider's reply, trip ids or amounts.
+                    return MessageResult(
+                        reply="Is message ko verify nahi kar paaya. Support se contact karein.",
+                        message_id=envelope.message_id,
+                        conversation_id=None,
+                        state="rejected",
+                        duplicate=True,
+                    )
+                conversation = session.get(Conversation, existing.conversation_id)
+                state = conversation.state if conversation is not None else existing.status
+                if existing.reply is not None or time.monotonic() >= deadline:
+                    return MessageResult(
+                        reply=existing.reply or "Aapka message process ho raha hai.",
+                        message_id=existing.message_id,
+                        conversation_id=existing.conversation_id,
+                        state=state if existing.reply is not None else "processing",
+                        duplicate=True,
+                    )
+            time.sleep(0.1)
 
     def _reserve_once(self, envelope: MessageEnvelope) -> tuple[str, int] | MessageResult:
         if not envelope.message_id.strip() or not envelope.text.strip():
@@ -160,16 +256,34 @@ class ConversationService:
             raise ValueError("message text exceeds the configured limit")
         if envelope.received_at.tzinfo is None:
             raise ValueError("received_at must include a timezone")
+        duplicate_wait: bool | None = None
         with self.database.session() as session, session.begin():
             existing = session.get(Message, envelope.message_id)
             if existing is not None:
-                return MessageResult(
-                    reply=existing.reply or "Aapka message process ho raha hai.",
-                    message_id=existing.message_id,
-                    conversation_id=existing.conversation_id,
-                    state=existing.status,
-                    duplicate=True,
-                )
+                if (
+                    existing.rider_id == envelope.rider_id
+                    and existing.reply is None
+                    and existing.status == "processing"
+                    and _message_age(existing) > PROCESSING_RESUME_AFTER
+                ):
+                    # Abandoned after durable receipt (crash/restart): this delivery resumes it.
+                    existing.created_at = datetime.now(UTC)
+                    add_trace_event(
+                        session,
+                        rider_id=envelope.rider_id,
+                        conversation_id=existing.conversation_id,
+                        message_id=envelope.message_id,
+                        event_type="message_in",
+                        name="vendor_message_resumed",
+                        input_payload={"message_id": envelope.message_id},
+                        output_payload=None,
+                    )
+                    return existing.conversation_id, existing.turn_number
+                duplicate_wait = existing.reply is None and existing.rider_id == envelope.rider_id
+        if duplicate_wait is not None:
+            # Wait outside the reservation transaction so the owning request can commit.
+            return self._duplicate_result(envelope, wait=duplicate_wait)
+        with self.database.session() as session, session.begin():
             rider = session.get(Rider, envelope.rider_id)
             if rider is None:
                 return MessageResult(
@@ -245,15 +359,13 @@ class ConversationService:
                     .order_by(Decision.decision_version.desc())
                     .limit(1)
                 )
+                effective_date, trip_ids = _dispute_evidence_summary(session, dispute, latest)
                 dispute_context.append(
                     {
                         "dispute_id": dispute.dispute_id,
                         "dispute_type": dispute.dispute_type,
-                        "service_date_ist": (
-                            dispute.service_date_ist.isoformat()
-                            if dispute.service_date_ist
-                            else None
-                        ),
+                        "service_date_ist": effective_date,
+                        "trip_ids": list(trip_ids),
                         "state": dispute.state,
                         "amount": latest.amount if latest else None,
                     }
@@ -349,6 +461,7 @@ class ConversationService:
                 conversation,
                 result,
                 gate,
+                open_ids,
             )
             outcomes: list[Outcome] = []
             for dispute_id, complaint_ids in complaint_groups.items():
@@ -402,6 +515,17 @@ class ConversationService:
                 if intent is not None:
                     supported_amount_values.add(intent.amount)
                     provider_confirmed = intent.status == "confirmed"
+                resolved = session.scalar(
+                    select(OpsItem)
+                    .where(
+                        OpsItem.rider_id == envelope.rider_id,
+                        OpsItem.status.in_({"rejected", "approved"}),
+                    )
+                    .order_by(OpsItem.resolved_at.desc())
+                    .limit(1)
+                )
+                if resolved is not None and resolved.amount is not None:
+                    supported_amount_values.add(resolved.amount)
             supported_amounts = frozenset(supported_amount_values)
             reply_report = self.reply_gate.check(
                 ReplyProposal(
@@ -465,6 +589,7 @@ class ConversationService:
         conversation: Conversation,
         result: InterpretationResult,
         gate: GateReport,
+        open_ids: set[str],
     ) -> dict[str, list[str]]:
         accepted = set(gate.accepted_complaint_indexes)
         global_block = any(
@@ -487,10 +612,37 @@ class ConversationService:
             can_draft = not global_block and extracted.complaint_type != "unknown"
             dispute: Dispute | None = None
             if is_accepted or can_draft:
-                if extracted.target_dispute_id:
-                    dispute = session.get(Dispute, extracted.target_dispute_id)
-                else:
-                    dispute = group_to_dispute.get(grouping_key)
+                target = extracted.target_dispute_id
+                # The model may only link to disputes Gate A saw as this conversation's own;
+                # anything else is ignored rather than dereferenced (cross-account safety).
+                if target and target in open_ids:
+                    dispute = session.get(Dispute, target)
+                    if dispute is not None and dispute.rider_id != envelope.rider_id:
+                        dispute = None
+                    if dispute is not None and not _can_attach_follow_up(
+                        session, envelope.rider_id, dispute, extracted
+                    ):
+                        dispute = None
+                if dispute is None:
+                    effective_date = extracted.service_date_ist or _owned_trip_service_date(
+                        session, envelope.rider_id, extracted.trip_ids
+                    )
+                    grouping_key = _grouping_key_for(
+                        envelope.rider_id,
+                        effective_date,
+                        extracted.complaint_type,
+                        extracted.trip_ids,
+                    )
+                    dispute = group_to_dispute.get(grouping_key) or session.scalar(
+                        select(Dispute)
+                        .where(
+                            Dispute.rider_id == envelope.rider_id,
+                            Dispute.conversation_id == conversation.conversation_id,
+                            Dispute.grouping_key == grouping_key,
+                        )
+                        .order_by(Dispute.created_at.desc())
+                        .limit(1)
+                    )
                 if dispute is None:
                     dispute = Dispute(
                         dispute_id=f"dsp_{uuid4().hex}",
@@ -498,18 +650,26 @@ class ConversationService:
                         rider_id=envelope.rider_id,
                         state="verifying" if is_accepted else "needs_clarification",
                         dispute_type=extracted.complaint_type,
-                        service_date_ist=extracted.service_date_ist,
+                        service_date_ist=effective_date,
                         policy_cause=extracted.complaint_type,
                         grouping_key=grouping_key,
                     )
                     session.add(dispute)
                     session.flush()
                 elif is_accepted:
-                    dispute.state = "verifying"
-                    dispute.dispute_type = extracted.complaint_type
-                    dispute.policy_cause = extracted.complaint_type
-                    if extracted.service_date_ist is not None:
+                    # A follow-up may only *fill in* missing facts of an existing dispute.
+                    # Re-dating or re-typing a dispute that already has decisions would let
+                    # text noise ("10 wala") move money or flip a pending approval.
+                    if dispute.dispute_type == "unknown" and extracted.complaint_type != "unknown":
+                        dispute.dispute_type = extracted.complaint_type
+                        dispute.policy_cause = extracted.complaint_type
+                    if dispute.service_date_ist is None and extracted.service_date_ist is not None:
                         dispute.service_date_ist = extracted.service_date_ist
+                        dispute.grouping_key = _grouping_key_for(
+                            envelope.rider_id, dispute.service_date_ist, dispute.dispute_type
+                        )
+                    if dispute.state in REVERIFIABLE_DISPUTE_STATES:
+                        dispute.state = "verifying"
                 group_to_dispute[grouping_key] = dispute
 
             status = (
@@ -607,10 +767,63 @@ class ConversationService:
             trip_ids=trip_ids,
             received_at=envelope.received_at,
         )
+        if (
+            dispute.service_date_ist is None
+            and evaluation.ownership == "verified"
+            and evaluation.service_date_ist is not None
+        ):
+            dispute.service_date_ist = evaluation.service_date_ist
+            dispute.grouping_key = _grouping_key_for(
+                envelope.rider_id, dispute.service_date_ist, dispute.dispute_type
+            )
         prior_auto = self._prior_auto_payment(
             session, envelope.rider_id, envelope.received_at, ledger
         )
-        plan = plan_decision(evaluation, prior_auto_payment_today=prior_auto)
+        # Gate B rule 9: what is already queued, paid, awaiting approval or rejected for
+        # this evidence — across disputes, local intents and the PaySwift ledger.
+        commitments = summarize_commitments(
+            session,
+            rider_id=envelope.rider_id,
+            dispute_id=dispute_id,
+            complaint_type=evaluation.complaint_type,
+            service_date_ist=evaluation.service_date_ist,
+            trip_ids=evaluation.trip_ids,
+            ledger=ledger,
+        )
+        already_actioned = self._already_actioned(
+            session, envelope, dispute, complaint_ids, evaluation, commitments
+        )
+        if already_actioned is not None:
+            return already_actioned
+        if evaluation.verified_shortfall and commitments.committed_amount > 0:
+            remaining = max(evaluation.verified_shortfall - commitments.committed_amount, 0)
+            evaluation = replace(
+                evaluation,
+                verified_shortfall=remaining,
+                reason_codes=evaluation.reason_codes + ("prior_commitment_deducted",),
+            )
+        plan = plan_decision(
+            evaluation,
+            prior_auto_payment_today=prior_auto,
+            committed_amount=commitments.related_amount,
+        )
+        pushback = any(
+            complaint.complaint_type == "record_disagreement"
+            or bool((complaint.raw_payload.get("relation") or {}).get("contradicts_prior"))
+            for complaint in complaints
+        )
+        if pushback and plan.outcome == "explain_no_shortfall" and plan.reason_codes == (
+            "no_shortfall",
+        ):
+            # Rider disagrees with a verified result: re-check happened, record it for ops.
+            plan = DecisionPlan(
+                "escalate",
+                "create_escalation",
+                None,
+                ("record_disagreement",) + tuple(evaluation.reason_codes),
+                escalation_category="record_disagreement",
+                escalation_reason=_disagreement_reason(evaluation),
+            )
         version = (
             int(
                 session.scalar(
@@ -629,7 +842,8 @@ class ConversationService:
                 dispute_id=dispute_id,
                 kind="payout_reconciliation",
                 source_ref=f"evaluation:{dispute_id}:{version}",
-                payload=_evaluation_payload(evaluation),
+                payload=_evaluation_payload(evaluation)
+                | {"committed_amount": commitments.committed_amount},
                 policy_version=self.settings.policy_version,
                 normalization_version=self.settings.normalization_version,
             )
@@ -649,7 +863,17 @@ class ConversationService:
         session.flush()
         action_day = envelope.received_at.astimezone(IST).date().isoformat()
         idempotency_key = f"payout:{dispute_id}:{version}"
-        reference = f"qd:{dispute_id}:day:{action_day}"
+        # The provider reference identifies the *logical* dispute (rider, cause, IST service
+        # date, evidence trips) plus the IST action day used by the daily auto-pay rule — never
+        # a dispute id or decision version, so ledger reconciliation survives re-sent
+        # complaints, re-grouped disputes and sandbox restarts.
+        logical = logical_reference(
+            envelope.rider_id,
+            evaluation.complaint_type,
+            evaluation.service_date_ist,
+            evaluation.trip_ids,
+        )
+        reference = f"{logical}:day:{action_day}"
         fingerprint = (
             payout_request_fingerprint(envelope.rider_id, plan.amount, reference)
             if plan.amount is not None
@@ -678,6 +902,12 @@ class ConversationService:
                 idempotency_fingerprint_matches=fingerprint_ok,
                 escalation_category=plan.escalation_category,
                 escalation_reason=plan.escalation_reason,
+                already_covered=bool(
+                    plan.amount is not None
+                    and evaluation.verified_shortfall is not None
+                    and evaluation.verified_shortfall <= 0
+                ),
+                committed_amount=commitments.related_amount,
             )
         )
         persist_gate_report(
@@ -757,6 +987,130 @@ class ConversationService:
             outcome.action_state = "succeeded"
         return outcome
 
+    def _already_actioned(
+        self,
+        session: Session,
+        envelope: MessageEnvelope,
+        dispute: Dispute,
+        complaint_ids: list[str],
+        evaluation: DisputeEvaluation,
+        commitments: CommitmentSummary,
+    ) -> Outcome | None:
+        """Report an existing action instead of deciding again (Gate B rules 1 and 9).
+
+        Returns ``None`` when the message brings genuinely new evidence or nothing has been
+        committed for this evidence yet.
+        """
+        is_incentive = evaluation.complaint_type == "daily_incentive"
+        new_evidence = (
+            False
+            if is_incentive
+            else bool(set(evaluation.trip_ids) - set(commitments.known_trip_ids))
+        )
+        same_dispute = (
+            commitments.same_dispute_intent is not None
+            or commitments.same_dispute_pending is not None
+        )
+        has_shortfall = bool(evaluation.verified_shortfall)
+        fully_covered = (
+            has_shortfall
+            and commitments.committed_amount > 0
+            and commitments.committed_amount >= (evaluation.verified_shortfall or 0)
+        )
+        rejected = (
+            commitments.rejected_item
+            if commitments.rejected_item is not None
+            and (commitments.rejected_item.item_type == "approval" or not new_evidence)
+            else None
+        )
+        if not ((same_dispute and not new_evidence) or fully_covered or rejected):
+            return None
+        if rejected is not None and not (same_dispute or fully_covered):
+            suffix = f": {rejected.reviewer_note}" if rejected.reviewer_note else "."
+            if rejected.item_type == "approval" and rejected.amount is not None:
+                note = (
+                    f"₹{rejected.amount} ka claim ops team ne review karke decline kiya tha"
+                    f"{suffix}"
+                )
+                rejected_amount: int | None = rejected.amount
+            else:
+                note = f"Aapka case ops team ne review karke close kiya tha{suffix}"
+                rejected_amount = None
+            plan = DecisionPlan(
+                "report_status", "reply_only", rejected_amount, ("ops_rejected",)
+            )
+            outcome = Outcome(complaint_ids, dispute.dispute_id, plan, evaluation, "succeeded")
+            outcome.status_note = note
+            self._trace_already_actioned(session, envelope, dispute, plan, commitments)
+            return outcome
+        intent = commitments.same_dispute_intent
+        pending = commitments.same_dispute_pending
+        confirmed = commitments.paid_amount
+        processing = commitments.processing_amount
+        approval = commitments.approval_amount
+        trip_label = f"{', '.join(evaluation.trip_ids)}: " if evaluation.trip_ids else ""
+        outcome = Outcome(
+            complaint_ids,
+            dispute.dispute_id,
+            DecisionPlan("report_status", "reply_only", None, ("already_actioned",)),
+            evaluation,
+            "succeeded",
+        )
+        if pending is not None and pending.item_type == "escalation":
+            outcome.escalation_pending = True
+            outcome.status_note = (
+                "Yeh case ops team ke paas review mein hai; update milte hi batayenge."
+            )
+        elif (intent is not None and intent.status == "confirmed") or (
+            confirmed and not processing
+        ):
+            amount = (
+                intent.amount if intent is not None and intent.status == "confirmed" else confirmed
+            )
+            outcome.provider_confirmed = True
+            outcome.plan = replace(outcome.plan, amount=amount)
+            outcome.status_note = (
+                f"{trip_label}₹{amount} pehle hi PaySwift par process ho gaya hai."
+            )
+        elif intent is not None or processing:
+            amount = intent.amount if intent is not None else processing
+            outcome.action_state = "queued"
+            outcome.plan = replace(outcome.plan, amount=amount)
+            outcome.status_note = f"{trip_label}₹{amount} ka payout pehle se processing mein hai."
+        elif (pending is not None and pending.item_type == "approval") or approval:
+            amount = pending.amount if pending is not None and pending.amount else approval
+            outcome.approval_pending = True
+            outcome.plan = replace(outcome.plan, amount=amount)
+            outcome.status_note = f"{trip_label}₹{amount} pehle se ops approval mein hai."
+        else:
+            outcome.status_note = "Is complaint par pehle hi action ho chuka hai."
+        self._trace_already_actioned(session, envelope, dispute, outcome.plan, commitments)
+        return outcome
+
+    @staticmethod
+    def _trace_already_actioned(
+        session: Session,
+        envelope: MessageEnvelope,
+        dispute: Dispute,
+        plan: DecisionPlan,
+        commitments: CommitmentSummary,
+    ) -> None:
+        add_trace_event(
+            session,
+            rider_id=envelope.rider_id,
+            conversation_id=dispute.conversation_id,
+            message_id=envelope.message_id,
+            dispute_id=dispute.dispute_id,
+            event_type="decision",
+            name="already_actioned",
+            input_payload={"plan": asdict(plan)},
+            output_payload={
+                "committed_amount": commitments.committed_amount,
+                "commitments": [asdict(item) for item in commitments.commitments],
+                "rule": "money.not_already_covered",
+            },
+        )
+
     def _render_reply(
         self,
         session: Session,
@@ -765,16 +1119,24 @@ class ConversationService:
         gate: GateReport,
         outcomes: list[Outcome],
     ) -> tuple[str, str]:
-        if (
-            not result.interpretation.complaints
-            and result.interpretation.requested_status != "not_applicable"
-        ):
-            return self._status_reply(session, envelope.rider_id)
         if any(
             reason in {"identity_or_privacy_risk", "prompt_injection"}
             for reason in gate.blocking_reasons
         ):
             return "Is request ko payout action ke liye use nahi kar sakta.", "none"
+        if (
+            not result.interpretation.complaints
+            and result.interpretation.requested_status != "not_applicable"
+        ):
+            return self._status_reply(session, envelope.rider_id)
+        if (
+            not result.interpretation.complaints
+            and result.interpretation.message_intent == "greeting_or_thanks"
+        ):
+            return (
+                "Shukriya! Agar koi aur payout sawaal ho to date ya order ID ke saath batayein.",
+                "none",
+            )
         lines: list[str] = []
         statuses: set[str] = set()
         for index, item in enumerate(outcomes, start=1):
@@ -782,7 +1144,17 @@ class ConversationService:
             amount = item.plan.amount
             evaluation = item.evaluation
             trip_label = f"{', '.join(evaluation.trip_ids)}: " if evaluation.trip_ids else ""
-            if item.plan.outcome == "auto_pay" and amount is not None:
+            if item.plan.outcome == "report_status":
+                lines.append(f"{prefix}{item.status_note}")
+                if item.provider_confirmed:
+                    statuses.add("paid")
+                elif item.approval_pending:
+                    statuses.add("awaiting_approval")
+                elif item.escalation_pending:
+                    statuses.add("escalated")
+                elif item.action_state == "queued":
+                    statuses.add("processing")
+            elif item.plan.outcome == "auto_pay" and amount is not None:
                 if item.provider_confirmed:
                     lines.append(f"{prefix}{trip_label}₹{amount} PaySwift par process ho gaya hai.")
                     statuses.add("paid")
@@ -797,7 +1169,7 @@ class ConversationService:
                 )
                 statuses.add("awaiting_approval")
             elif item.plan.outcome == "escalate":
-                lines.append(f"{prefix}Is complaint ko ops investigation ke liye bheja hai.")
+                lines.append(f"{prefix}{_escalation_line(item.plan, evaluation)}")
                 statuses.add("escalated")
             elif evaluation.ownership == "mismatch":
                 lines.append(f"{prefix}Is trip ko aapke account se verify nahi kar paaya.")
@@ -839,14 +1211,14 @@ class ConversationService:
         return " ".join(lines), status
 
     def _status_reply(self, session: Session, rider_id: str) -> tuple[str, str]:
+        lines: list[str] = []
+        statuses: set[str] = set()
         pending = session.scalar(
             select(OpsItem)
             .where(OpsItem.rider_id == rider_id, OpsItem.status == "pending")
             .order_by(OpsItem.created_at.desc())
             .limit(1)
         )
-        if pending is not None and pending.item_type == "approval":
-            return f"₹{pending.amount} ops approval mein hai.", "awaiting_approval"
         intent = session.scalar(
             select(PayoutIntent)
             .where(PayoutIntent.rider_id == rider_id)
@@ -854,10 +1226,36 @@ class ConversationService:
             .limit(1)
         )
         if intent is not None and intent.status == "confirmed":
-            return f"₹{intent.amount} PaySwift par process ho gaya hai.", "paid"
-        if intent is not None:
-            return f"₹{intent.amount} payout processing mein hai.", "processing"
-        return "Abhi koi pending payment ya approval nahi mila.", "none"
+            lines.append(f"₹{intent.amount} PaySwift par process ho gaya hai.")
+            statuses.add("paid")
+        elif intent is not None and intent.status != "failed":
+            lines.append(f"₹{intent.amount} payout processing mein hai.")
+            statuses.add("processing")
+        if pending is not None and pending.item_type == "approval" and pending.amount is not None:
+            lines.append(f"₹{pending.amount} ops approval mein hai.")
+            statuses.add("awaiting_approval")
+        elif pending is not None:
+            lines.append("Aapka case ops team ke paas review mein hai.")
+            statuses.add("escalated")
+        if not lines:
+            resolved = session.scalar(
+                select(OpsItem)
+                .where(OpsItem.rider_id == rider_id, OpsItem.status.in_({"rejected", "approved"}))
+                .order_by(OpsItem.resolved_at.desc())
+                .limit(1)
+            )
+            if resolved is not None and resolved.status == "rejected":
+                note = f": {resolved.reviewer_note}" if resolved.reviewer_note else "."
+                if resolved.item_type == "approval" and resolved.amount is not None:
+                    lines.append(
+                        f"₹{resolved.amount} ka claim ops team ne review karke decline kiya{note}"
+                    )
+                else:
+                    lines.append(f"Aapka case ops team ne review karke close kiya{note}")
+            else:
+                lines.append("Abhi koi pending payment ya approval nahi mila.")
+        status = next(iter(statuses)) if len(statuses) == 1 else "mixed" if statuses else "none"
+        return " ".join(lines), status
 
     def _prior_auto_payment(
         self,
@@ -943,10 +1341,16 @@ class ConversationService:
 
 
 def _lock_rider(session: Session, rider_id: str) -> None:
-    if session.bind is not None and session.bind.dialect.name == "postgresql":
-        session.execute(
-            text("SELECT pg_advisory_xact_lock(hashtext(:rider_id))"), {"rider_id": rider_id}
-        )
+    lock_rider(session, rider_id)
+
+
+def _message_age(message: Message) -> timedelta:
+    created = message.created_at
+    if created is None:
+        return timedelta(0)
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=UTC)
+    return datetime.now(UTC) - created
 
 
 def _complaint_id(message_id: str, index: int) -> str:
@@ -954,19 +1358,152 @@ def _complaint_id(message_id: str, index: int) -> str:
     return f"cmp_{digest}"
 
 
+def _grouping_key_for(
+    rider_id: str,
+    service_date: Any,
+    complaint_type: str,
+    trip_ids: tuple[str, ...] | list[str] = (),
+) -> str:
+    if service_date:
+        date_token = service_date.isoformat()
+    elif trip_ids:
+        date_token = "trips:" + ",".join(sorted(set(trip_ids)))
+    else:
+        date_token = "unknown"
+    return "|".join((rider_id, date_token, complaint_type))
+
+
 def _grouping_key(envelope: MessageEnvelope, complaint: ExtractedComplaint) -> str:
+    """D-007: rider + IST service date + policy cause identify a logical dispute.
+
+    The vendor message id is deliberately *not* part of the key — a re-sent or rephrased
+    complaint must attach to the existing dispute instead of opening a parallel one.
+    """
     if complaint.target_dispute_id:
         return f"follow-up:{complaint.target_dispute_id}"
-    service_date = (
-        complaint.service_date_ist.isoformat() if complaint.service_date_ist else "unknown"
+    return _grouping_key_for(
+        envelope.rider_id,
+        complaint.service_date_ist,
+        complaint.complaint_type,
+        complaint.trip_ids,
     )
-    return "|".join(
-        (
-            envelope.rider_id,
-            service_date,
-            complaint.complaint_type,
-            envelope.message_id,
+
+
+def _owned_trip_service_date(
+    session: Session, rider_id: str, trip_ids: tuple[str, ...]
+) -> Any:
+    if not trip_ids:
+        return None
+    dates = set(
+        session.scalars(
+            select(NormalizedTrip.service_date_ist).where(
+                NormalizedTrip.rider_id == rider_id,
+                NormalizedTrip.trip_id.in_(trip_ids),
+            )
         )
+    )
+    return next(iter(dates)) if len(dates) == 1 else None
+
+
+def _dispute_evidence_summary(
+    session: Session, dispute: Dispute, latest: Decision | None
+) -> tuple[str | None, tuple[str, ...]]:
+    effective_date = dispute.service_date_ist.isoformat() if dispute.service_date_ist else None
+    trip_ids: list[str] = []
+    if latest is not None:
+        for evidence_id in latest.evidence_ids or []:
+            evidence = session.get(Evidence, evidence_id)
+            if evidence is not None and isinstance(evidence.payload, dict):
+                for trip_id in evidence.payload.get("trip_ids") or []:
+                    if str(trip_id) not in trip_ids:
+                        trip_ids.append(str(trip_id))
+                if effective_date is None and evidence.payload.get("service_date_ist"):
+                    effective_date = str(evidence.payload["service_date_ist"])
+                break
+    for complaint_trips in session.scalars(
+        select(Complaint.trip_ids).where(Complaint.dispute_id == dispute.dispute_id)
+    ):
+        for trip_id in complaint_trips or []:
+            if str(trip_id) not in trip_ids:
+                trip_ids.append(str(trip_id))
+    return effective_date, tuple(trip_ids)
+
+
+def _can_attach_follow_up(
+    session: Session,
+    rider_id: str,
+    dispute: Dispute,
+    extracted: ExtractedComplaint,
+) -> bool:
+    if extracted.complaint_type not in {"unknown", "record_disagreement"} and (
+        dispute.dispute_type not in {"unknown", extracted.complaint_type}
+    ):
+        return False
+    latest = session.scalar(
+        select(Decision)
+        .where(Decision.dispute_id == dispute.dispute_id)
+        .order_by(Decision.decision_version.desc())
+        .limit(1)
+    )
+    prior_date_str, prior_trips = _dispute_evidence_summary(session, dispute, latest)
+    complaint_date = extracted.service_date_ist or _owned_trip_service_date(
+        session, rider_id, extracted.trip_ids
+    )
+    if (
+        complaint_date is not None
+        and prior_date_str is not None
+        and complaint_date.isoformat() != prior_date_str
+    ):
+        return False
+    if extracted.trip_ids:
+        if prior_trips:
+            if set(extracted.trip_ids).isdisjoint(prior_trips):
+                return False
+        elif dispute.state not in {"draft", "needs_clarification"}:
+            return False
+    return True
+
+
+def _escalation_line(plan: DecisionPlan, evaluation: DisputeEvaluation) -> str:
+    category = plan.escalation_category or ""
+    if category == "ownership":
+        return "Is trip ko aapke account se verify nahi kar paaya; ops team check karegi."
+    if category == "distance":
+        return (
+            "Export ka recorded distance check hua, lekin actual route distance source se "
+            "prove nahi ho sakta; ops team review karegi."
+        )
+    if category == "policy_exception":
+        return (
+            "Recorded rider cancellation par policy penalty hai; exception ke liye case ops "
+            "team ke paas review mein hai."
+        )
+    if category == "record_disagreement":
+        if evaluation.complaint_type == "daily_incentive":
+            count = evaluation.completed_trip_count or 0
+            return (
+                f"Dobara check kiya: record mein {count} completed trips hain (incentive ke liye "
+                "12 chahiye). Aapka disagreement ops team ko review ke liye diya hai."
+            )
+        return (
+            "Dobara check kiya, record wahi hai; aapka disagreement ops team ko review ke "
+            "liye diya hai."
+        )
+    if category == "data_quality":
+        return "Is trip ke source records mein conflict hai; ops team verify karegi."
+    return "Is complaint ko ops investigation ke liye refer kiya hai."
+
+
+def _disagreement_reason(evaluation: DisputeEvaluation) -> str:
+    if evaluation.complaint_type == "daily_incentive":
+        return (
+            f"Rider disputes the recorded count: {evaluation.completed_trip_count or 0} completed "
+            f"trips on {evaluation.service_date_ist}; incentive needs 12."
+        )
+    trips = ", ".join(evaluation.trip_ids) or "the checked trips"
+    return (
+        f"Rider disputes the verified result for {trips}: expected {evaluation.expected_total}, "
+        f"actual {evaluation.actual_total}, no shortfall."
     )
 
 
