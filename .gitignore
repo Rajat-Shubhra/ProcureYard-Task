@@ -4,3 +4,10 @@ node_modules/
 __pycache__/
 *.pyc
 !payswift/server.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/

@@ -1,0 +1,38 @@
+{
+  "language": "hinglish",
+  "primary_intent": "surge_missing",
+  "secondary_intents": [],
+  "trip_ids": [
+    "T926334"
+  ],
+  "date_mentions": [
+    {
+      "raw": "20 tarikh wala",
+      "resolved_date_ist": "2026-09-20",
+      "resolution_status": "resolved"
+    }
+  ],
+  "alleged_amount_rupees": null,
+  "needs_clarification": false,
+  "clarification_fields": [],
+  "contradicts_prior_turn": false,
+  "follow_up_dispute_id": null,
+  "requested_status": "not_applicable",
+  "confidence": 0.99,
+  "safety_flags": [
+    "none"
+  ],
+  "claims": [
+    {
+      "claim_index": 0,
+      "type": "surge",
+      "summary": "Rider says surge was missing for trip T926334 on 20 September 2026.",
+      "service_date_ist": "2026-09-20",
+      "trip_ids": [
+        "T926334"
+      ],
+      "alleged_amount_rupees": null,
+      "grouping_key": "2026-09-20|surge"
+    }
+  ]
+}

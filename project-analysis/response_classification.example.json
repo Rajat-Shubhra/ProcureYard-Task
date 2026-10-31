@@ -1,0 +1,284 @@
+{
+  "schema_version": "1.0.0",
+  "classification_id": "cls_01",
+  "message": {
+    "message_id": "wamid.5RHB2ELK3YVT37",
+    "rider_id": "R003",
+    "text": "Bhai order T926334 ka surge nahi mila, 20 tarikh wala. Check karo pls",
+    "received_at": "2026-09-22T09:05:00+05:30",
+    "received_date_ist": "2026-09-22",
+    "is_duplicate": false,
+    "duplicate_of": null
+  },
+  "conversation": {
+    "conversation_id": "conv_R003_01",
+    "state": "resolved_paid",
+    "open_dispute_ids": [],
+    "turn_number": 1,
+    "language": "hinglish",
+    "memory_version": 1
+  },
+  "interpretation": {
+    "primary_intent": "surge_missing",
+    "secondary_intents": [],
+    "trip_ids": [
+      "T926334"
+    ],
+    "date_mentions": [
+      {
+        "raw": "20 tarikh",
+        "resolved_date_ist": "2026-09-20",
+        "resolution_status": "resolved"
+      }
+    ],
+    "alleged_amount_rupees": null,
+    "needs_clarification": false,
+    "clarification_fields": [],
+    "contradicts_prior_turn": false,
+    "confidence": 0.99,
+    "safety_flags": [
+      "none"
+    ]
+  },
+  "disputes": [
+    {
+      "dispute_id": "dsp_R003_T926334_surge",
+      "type": "surge",
+      "status": "paid",
+      "claim": "Surge was not included for trip T926334 on 2026-09-20.",
+      "trip_ids": [
+        "T926334"
+      ],
+      "service_date_ist": "2026-09-20",
+      "ownership": "verified",
+      "policy_window": "eligible",
+      "calculation": {
+        "currency": "INR",
+        "expected_components": [
+          {
+            "kind": "trip_fare",
+            "reference_id": "T926334",
+            "amount": 74
+          }
+        ],
+        "actual_components": [
+          {
+            "kind": "trip_fare",
+            "reference_id": "PL000248",
+            "amount": 49
+          }
+        ],
+        "expected_total": 74,
+        "actual_total": 49,
+        "verified_shortfall": 25,
+        "calculation_rule_version": "payout-policy-v1"
+      },
+      "evidence_ids": [
+        "ev_trip_T926334",
+        "ev_line_PL000248",
+        "ev_policy_v1",
+        "ev_payswift_pout_abc123"
+      ],
+      "data_quality_flags": [
+        "none"
+      ],
+      "confidence": 1.0
+    }
+  ],
+  "evidence": [
+    {
+      "evidence_id": "ev_trip_T926334",
+      "source": "trips_export",
+      "record_id": "T926334",
+      "raw": {
+        "rider_id": "R003",
+        "started_at": "2026-09-20T07:27:00Z",
+        "status": "completed",
+        "distance_km": "6.0",
+        "surge_multiplier": "1.5"
+      },
+      "normalized": {
+        "rider_id": "R003",
+        "service_date_ist": "2026-09-20",
+        "distance_km": 6.0,
+        "surge_multiplier": 1.5
+      },
+      "normalization_rules": [
+        "utc_to_ist_v1"
+      ],
+      "observed_at": "2026-09-22T03:35:01Z"
+    },
+    {
+      "evidence_id": "ev_line_PL000248",
+      "source": "payout_lines_export",
+      "record_id": "PL000248",
+      "raw": {
+        "rider_id": "R003",
+        "line_type": "trip",
+        "trip_id": "T926334",
+        "amount": "49"
+      },
+      "normalized": {
+        "amount": 49
+      },
+      "normalization_rules": [
+        "integer_amount_v1"
+      ],
+      "observed_at": "2026-09-22T03:35:01Z"
+    },
+    {
+      "evidence_id": "ev_policy_v1",
+      "source": "policy",
+      "record_id": "payout-policy-v1",
+      "raw": "Completed trip fare and surge policy.",
+      "normalized": {
+        "base_rupees": 25,
+        "per_km_after_2_rupees": 6,
+        "rounding": "half_up_per_trip"
+      },
+      "normalization_rules": [],
+      "observed_at": "2026-09-22T03:35:01Z"
+    },
+    {
+      "evidence_id": "ev_payswift_pout_abc123",
+      "source": "payswift",
+      "record_id": "pout_abc123",
+      "raw": {
+        "payout_id": "pout_abc123",
+        "rider_id": "R003",
+        "amount": 25,
+        "status": "processed"
+      },
+      "normalized": {
+        "payout_id": "pout_abc123",
+        "rider_id": "R003",
+        "amount": 25,
+        "status": "processed"
+      },
+      "normalization_rules": [],
+      "observed_at": "2026-09-22T03:35:02Z"
+    }
+  ],
+  "decision": {
+    "outcome": "auto_pay",
+    "reason_codes": [
+      "verified_shortfall",
+      "provider_confirmed"
+    ],
+    "selected_dispute_ids": [
+      "dsp_R003_T926334_surge"
+    ],
+    "verified_amount_rupees": 25,
+    "auto_pay_eligible": true,
+    "approval_amount_rupees": null,
+    "escalation": {
+      "required": false,
+      "category": "none",
+      "reason": null
+    },
+    "decided_by": "deterministic_policy_engine",
+    "policy_version": "payout-policy-v1"
+  },
+  "action": {
+    "kind": "submit_payout",
+    "state": "succeeded",
+    "ops_item_id": null,
+    "payout": {
+      "idempotency_key": "payout:dsp_R003_T926334_surge:1",
+      "request_fingerprint": "sha256:example",
+      "amount_rupees": 25,
+      "provider_payout_id": "pout_abc123",
+      "provider_status": "processed",
+      "attempt_count": 1,
+      "ledger_reconciled": true
+    },
+    "safe_to_retry": true
+  },
+  "response": {
+    "reply": "Order T926334 ka verified shortfall ₹25 tha. PaySwift par ₹25 process ho gaya hai.",
+    "language": "hinglish",
+    "tone": "concise",
+    "mentions": {
+      "trip_ids": [
+        "T926334"
+      ],
+      "dates": [
+        "2026-09-20"
+      ],
+      "amounts_rupees": [
+        25
+      ],
+      "completed_trip_count": null
+    },
+    "claims_payment_status": "paid",
+    "next_expected_actor": "none"
+  },
+  "checks": {
+    "deterministic_rule_gate": {
+      "passed": true,
+      "checker_version": "rule-gate-v1",
+      "checked_at": "2026-09-22T03:35:01Z",
+      "results": [
+        {
+          "rule_id": "identity.ownership",
+          "status": "pass",
+          "detail": "Trip belongs to envelope rider R003."
+        },
+        {
+          "rule_id": "policy.window",
+          "status": "pass",
+          "detail": "Service date is inside the seven-day IST window."
+        },
+        {
+          "rule_id": "money.verified_shortfall",
+          "status": "pass",
+          "detail": "Expected ₹74 minus paid ₹49 equals ₹25."
+        },
+        {
+          "rule_id": "money.auto_limits",
+          "status": "pass",
+          "detail": "Amount is at most ₹200 and no earlier auto-payment exists for the rider today."
+        }
+      ],
+      "blocking_reasons": []
+    },
+    "human_review": {
+      "required": false,
+      "status": "not_required",
+      "reviewer_id": null,
+      "reviewed_at": null,
+      "note": null
+    },
+    "reply_gate": {
+      "passed": true,
+      "checker_version": "reply-gate-v1",
+      "checked_at": "2026-09-22T03:35:02Z",
+      "results": [
+        {
+          "rule_id": "reply.amount_supported",
+          "status": "pass",
+          "detail": "Reply amount matches the verified and provider-confirmed amount."
+        },
+        {
+          "rule_id": "reply.payment_claim",
+          "status": "pass",
+          "detail": "Paid wording is supported by PaySwift processed status."
+        }
+      ],
+      "blocking_reasons": []
+    }
+  },
+  "audit": {
+    "trace_id": "trace_R003_01",
+    "created_at": "2026-09-22T03:35:00Z",
+    "updated_at": "2026-09-22T03:35:02Z",
+    "model": "provider/model-name",
+    "prompt_version": "strict-rules-v1",
+    "tool_call_ids": [
+      "tool_trip_lookup_01",
+      "tool_reconcile_01",
+      "tool_payswift_01"
+    ],
+    "source_snapshot_version": "assignment-export-v1"
+  }
+}

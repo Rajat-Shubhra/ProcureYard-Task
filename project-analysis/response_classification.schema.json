@@ -1,0 +1,984 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quickdrop.example/schemas/response-classification.schema.json",
+  "title": "QuickDrop rider-dispute response classification",
+  "description": "End-to-end classification and decision envelope. Model-populated interpretation is separated from runtime-verified evidence, rule gates, actions, and reply status.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "classification_id",
+    "message",
+    "conversation",
+    "interpretation",
+    "disputes",
+    "evidence",
+    "decision",
+    "action",
+    "response",
+    "checks",
+    "audit"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "classification_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "message": {
+      "$ref": "#/$defs/message"
+    },
+    "conversation": {
+      "$ref": "#/$defs/conversation"
+    },
+    "interpretation": {
+      "$ref": "#/$defs/interpretation"
+    },
+    "disputes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/dispute"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidence"
+      }
+    },
+    "decision": {
+      "$ref": "#/$defs/decision"
+    },
+    "action": {
+      "$ref": "#/$defs/action"
+    },
+    "response": {
+      "$ref": "#/$defs/response"
+    },
+    "checks": {
+      "$ref": "#/$defs/checks"
+    },
+    "audit": {
+      "$ref": "#/$defs/audit"
+    }
+  },
+  "$defs": {
+    "nullableString": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "nullableInteger": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "message_id",
+        "rider_id",
+        "text",
+        "received_at",
+        "received_date_ist",
+        "is_duplicate",
+        "duplicate_of"
+      ],
+      "properties": {
+        "message_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rider_id": {
+          "type": "string",
+          "pattern": "^R[0-9]{3}$"
+        },
+        "text": {
+          "type": "string"
+        },
+        "received_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "received_date_ist": {
+          "type": "string",
+          "format": "date"
+        },
+        "is_duplicate": {
+          "type": "boolean"
+        },
+        "duplicate_of": {
+          "$ref": "#/$defs/nullableString"
+        }
+      }
+    },
+    "conversation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "conversation_id",
+        "state",
+        "open_dispute_ids",
+        "turn_number",
+        "language",
+        "memory_version"
+      ],
+      "properties": {
+        "conversation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "enum": [
+            "new",
+            "collecting_details",
+            "investigating",
+            "awaiting_approval",
+            "escalated",
+            "payout_processing",
+            "resolved_paid",
+            "resolved_explained",
+            "closed",
+            "error"
+          ]
+        },
+        "open_dispute_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "turn_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "language": {
+          "enum": [
+            "en",
+            "hi",
+            "hinglish",
+            "other",
+            "unknown"
+          ]
+        },
+        "memory_version": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "interpretation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primary_intent",
+        "secondary_intents",
+        "trip_ids",
+        "date_mentions",
+        "alleged_amount_rupees",
+        "needs_clarification",
+        "clarification_fields",
+        "contradicts_prior_turn",
+        "confidence",
+        "safety_flags"
+      ],
+      "properties": {
+        "primary_intent": {
+          "$ref": "#/$defs/intent"
+        },
+        "secondary_intents": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/intent"
+          }
+        },
+        "trip_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^T[0-9]+$"
+          }
+        },
+        "date_mentions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "raw",
+              "resolved_date_ist",
+              "resolution_status"
+            ],
+            "properties": {
+              "raw": {
+                "type": "string"
+              },
+              "resolved_date_ist": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date"
+              },
+              "resolution_status": {
+                "enum": [
+                  "resolved",
+                  "ambiguous",
+                  "invalid"
+                ]
+              }
+            }
+          }
+        },
+        "alleged_amount_rupees": {
+          "$ref": "#/$defs/nullableInteger"
+        },
+        "needs_clarification": {
+          "type": "boolean"
+        },
+        "clarification_fields": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "date",
+              "trip_id",
+              "issue_type",
+              "which_dispute",
+              "other"
+            ]
+          }
+        },
+        "contradicts_prior_turn": {
+          "type": "boolean"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "safety_flags": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "prompt_injection",
+              "identity_switch_attempt",
+              "cross_account_reference",
+              "sensitive_data_request",
+              "threat_or_abuse",
+              "none"
+            ]
+          }
+        }
+      }
+    },
+    "intent": {
+      "enum": [
+        "vague_payout_complaint",
+        "trip_payment_missing",
+        "trip_underpayment",
+        "surge_missing",
+        "distance_dispute",
+        "daily_incentive_missing",
+        "duplicate_penalty",
+        "cancellation_penalty_appeal",
+        "payment_status",
+        "approval_status",
+        "record_disagreement",
+        "greeting_or_thanks",
+        "unrelated",
+        "unknown"
+      ]
+    },
+    "dispute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dispute_id",
+        "type",
+        "status",
+        "claim",
+        "trip_ids",
+        "service_date_ist",
+        "ownership",
+        "policy_window",
+        "calculation",
+        "evidence_ids",
+        "data_quality_flags",
+        "confidence"
+      ],
+      "properties": {
+        "dispute_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "enum": [
+            "trip_payment",
+            "surge",
+            "distance",
+            "daily_incentive",
+            "cancellation_penalty",
+            "mixed",
+            "unknown"
+          ]
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "needs_clarification",
+            "verifying",
+            "verified_owed",
+            "verified_not_owed",
+            "awaiting_approval",
+            "escalated",
+            "payout_processing",
+            "paid",
+            "rejected",
+            "closed",
+            "error"
+          ]
+        },
+        "claim": {
+          "type": "string"
+        },
+        "trip_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "service_date_ist": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "ownership": {
+          "enum": [
+            "verified",
+            "mismatch",
+            "unknown"
+          ]
+        },
+        "policy_window": {
+          "enum": [
+            "eligible",
+            "expired",
+            "future",
+            "unknown"
+          ]
+        },
+        "calculation": {
+          "$ref": "#/$defs/calculation"
+        },
+        "evidence_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "data_quality_flags": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "exact_duplicate_trip",
+              "normalized_rider_id",
+              "normalized_distance_unit",
+              "conflicting_trip_rows",
+              "missing_trip",
+              "missing_payout_line",
+              "duplicate_payout_line",
+              "unexpected_overpayment",
+              "none"
+            ]
+          }
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "calculation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "currency",
+        "expected_components",
+        "actual_components",
+        "expected_total",
+        "actual_total",
+        "verified_shortfall",
+        "calculation_rule_version"
+      ],
+      "properties": {
+        "currency": {
+          "const": "INR"
+        },
+        "expected_components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/moneyComponent"
+          }
+        },
+        "actual_components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/moneyComponent"
+          }
+        },
+        "expected_total": {
+          "$ref": "#/$defs/nullableInteger"
+        },
+        "actual_total": {
+          "$ref": "#/$defs/nullableInteger"
+        },
+        "verified_shortfall": {
+          "$ref": "#/$defs/nullableInteger"
+        },
+        "calculation_rule_version": {
+          "$ref": "#/$defs/nullableString"
+        }
+      }
+    },
+    "moneyComponent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "reference_id",
+        "amount"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "trip_fare",
+            "daily_incentive",
+            "cancellation_penalty",
+            "adjustment"
+          ]
+        },
+        "reference_id": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "amount": {
+          "type": "integer"
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "source",
+        "record_id",
+        "raw",
+        "normalized",
+        "normalization_rules",
+        "observed_at"
+      ],
+      "properties": {
+        "evidence_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "enum": [
+            "rider_message",
+            "riders_export",
+            "trips_export",
+            "payout_lines_export",
+            "payswift",
+            "conversation_state",
+            "policy"
+          ]
+        },
+        "record_id": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "raw": {
+          "type": [
+            "object",
+            "array",
+            "string",
+            "number",
+            "boolean",
+            "null"
+          ]
+        },
+        "normalized": {
+          "type": [
+            "object",
+            "array",
+            "string",
+            "number",
+            "boolean",
+            "null"
+          ]
+        },
+        "normalization_rules": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "reason_codes",
+        "selected_dispute_ids",
+        "verified_amount_rupees",
+        "auto_pay_eligible",
+        "approval_amount_rupees",
+        "escalation",
+        "decided_by",
+        "policy_version"
+      ],
+      "properties": {
+        "outcome": {
+          "enum": [
+            "ask_clarification",
+            "explain_no_shortfall",
+            "auto_pay",
+            "seek_approval",
+            "escalate",
+            "report_payment_status",
+            "acknowledge",
+            "processing",
+            "fail_safe"
+          ]
+        },
+        "reason_codes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "missing_grounding",
+              "verified_shortfall",
+              "no_shortfall",
+              "already_paid",
+              "amount_over_auto_limit",
+              "daily_auto_limit_reached",
+              "outside_policy_window",
+              "ownership_mismatch",
+              "source_data_ambiguous",
+              "policy_exception_requested",
+              "record_disagreement",
+              "prompt_injection",
+              "provider_result_ambiguous",
+              "provider_confirmed",
+              "duplicate_message",
+              "unrelated_message"
+            ]
+          }
+        },
+        "selected_dispute_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "verified_amount_rupees": {
+          "$ref": "#/$defs/nullableInteger"
+        },
+        "auto_pay_eligible": {
+          "type": "boolean"
+        },
+        "approval_amount_rupees": {
+          "$ref": "#/$defs/nullableInteger"
+        },
+        "escalation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "required",
+            "category",
+            "reason"
+          ],
+          "properties": {
+            "required": {
+              "type": "boolean"
+            },
+            "category": {
+              "enum": [
+                "none",
+                "data_quality",
+                "ownership",
+                "policy_exception",
+                "security",
+                "record_disagreement",
+                "provider_failure",
+                "other"
+              ]
+            },
+            "reason": {
+              "$ref": "#/$defs/nullableString"
+            }
+          }
+        },
+        "decided_by": {
+          "enum": [
+            "deterministic_policy_engine",
+            "human_ops",
+            "none"
+          ]
+        },
+        "policy_version": {
+          "type": "string"
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "state",
+        "ops_item_id",
+        "payout",
+        "safe_to_retry"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "none",
+            "clarify",
+            "create_approval",
+            "create_escalation",
+            "submit_payout",
+            "reconcile_payout",
+            "reply_only"
+          ]
+        },
+        "state": {
+          "enum": [
+            "not_started",
+            "queued",
+            "in_progress",
+            "succeeded",
+            "failed",
+            "ambiguous",
+            "cancelled"
+          ]
+        },
+        "ops_item_id": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "payout": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "idempotency_key",
+            "request_fingerprint",
+            "amount_rupees",
+            "provider_payout_id",
+            "provider_status",
+            "attempt_count",
+            "ledger_reconciled"
+          ],
+          "properties": {
+            "idempotency_key": {
+              "$ref": "#/$defs/nullableString"
+            },
+            "request_fingerprint": {
+              "$ref": "#/$defs/nullableString"
+            },
+            "amount_rupees": {
+              "$ref": "#/$defs/nullableInteger"
+            },
+            "provider_payout_id": {
+              "$ref": "#/$defs/nullableString"
+            },
+            "provider_status": {
+              "enum": [
+                "not_requested",
+                "queued",
+                "request_in_progress",
+                "processed",
+                "rate_limited",
+                "unavailable",
+                "timeout",
+                "unknown"
+              ]
+            },
+            "attempt_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "ledger_reconciled": {
+              "type": "boolean"
+            }
+          }
+        },
+        "safe_to_retry": {
+          "type": "boolean"
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reply",
+        "language",
+        "tone",
+        "mentions",
+        "claims_payment_status",
+        "next_expected_actor"
+      ],
+      "properties": {
+        "reply": {
+          "type": "string"
+        },
+        "language": {
+          "enum": [
+            "en",
+            "hi",
+            "hinglish",
+            "other"
+          ]
+        },
+        "tone": {
+          "enum": [
+            "concise",
+            "empathetic",
+            "neutral"
+          ]
+        },
+        "mentions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "trip_ids",
+            "dates",
+            "amounts_rupees",
+            "completed_trip_count"
+          ],
+          "properties": {
+            "trip_ids": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string"
+              }
+            },
+            "dates": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "format": "date"
+              }
+            },
+            "amounts_rupees": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            },
+            "completed_trip_count": {
+              "$ref": "#/$defs/nullableInteger"
+            }
+          }
+        },
+        "claims_payment_status": {
+          "enum": [
+            "none",
+            "processing",
+            "awaiting_approval",
+            "escalated",
+            "paid"
+          ]
+        },
+        "next_expected_actor": {
+          "enum": [
+            "none",
+            "rider",
+            "ops",
+            "payout_worker",
+            "system_retry"
+          ]
+        }
+      }
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deterministic_rule_gate",
+        "human_review",
+        "reply_gate"
+      ],
+      "properties": {
+        "deterministic_rule_gate": {
+          "$ref": "#/$defs/gate"
+        },
+        "human_review": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "required",
+            "status",
+            "reviewer_id",
+            "reviewed_at",
+            "note"
+          ],
+          "properties": {
+            "required": {
+              "type": "boolean"
+            },
+            "status": {
+              "enum": [
+                "not_required",
+                "pending",
+                "approved",
+                "rejected"
+              ]
+            },
+            "reviewer_id": {
+              "$ref": "#/$defs/nullableString"
+            },
+            "reviewed_at": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            },
+            "note": {
+              "$ref": "#/$defs/nullableString"
+            }
+          }
+        },
+        "reply_gate": {
+          "$ref": "#/$defs/gate"
+        }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "passed",
+        "checker_version",
+        "checked_at",
+        "results",
+        "blocking_reasons"
+      ],
+      "properties": {
+        "passed": {
+          "type": "boolean"
+        },
+        "checker_version": {
+          "type": "string"
+        },
+        "checked_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "rule_id",
+              "status",
+              "detail"
+            ],
+            "properties": {
+              "rule_id": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "pass",
+                  "fail",
+                  "not_applicable"
+                ]
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "blocking_reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trace_id",
+        "created_at",
+        "updated_at",
+        "model",
+        "prompt_version",
+        "tool_call_ids",
+        "source_snapshot_version"
+      ],
+      "properties": {
+        "trace_id": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "model": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "prompt_version": {
+          "type": "string"
+        },
+        "tool_call_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "source_snapshot_version": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

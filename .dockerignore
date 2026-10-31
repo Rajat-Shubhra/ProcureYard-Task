@@ -1,0 +1,16 @@
+.git
+.github
+.env
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+ai-logs
+project-analysis/*
+!project-analysis/STRICT_RULES_SYSTEM_PROMPT.md
+!project-analysis/response_classification.schema.json
+!project-analysis/STRICT_RULES_SYSTEM_PROMPT.v2.md
+!project-analysis/response_classification.v2.schema.json
+tests
+

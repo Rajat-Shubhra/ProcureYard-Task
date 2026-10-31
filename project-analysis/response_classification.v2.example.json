@@ -1,0 +1,154 @@
+{
+  "schema_version": "2.0.0",
+  "classification_id": "cls_R027_CONV2A",
+  "message": {
+    "message_id": "wamid.CONV2A",
+    "rider_id": "R027",
+    "text": "20 ko surge nahi mila aur 21 ko penalty do baar kata",
+    "received_at": "2026-09-23T10:30:00+05:30",
+    "received_date_ist": "2026-09-23",
+    "is_duplicate": false
+  },
+  "conversation": {
+    "conversation_id": "conv_R027_01",
+    "state": "awaiting_approval",
+    "turn_number": 1,
+    "memory_version": 1,
+    "language": "hinglish",
+    "open_dispute_ids": ["dsp_R027_surge_20", "dsp_R027_penalty_21"]
+  },
+  "interpretation": {
+    "schema_version": "2.0.0",
+    "model": "openai/gpt-oss-20b",
+    "prompt_version": "strict-rules-v2",
+    "message_intent": "new_complaint",
+    "requested_status": "not_applicable",
+    "safety_flags": ["none"],
+    "attempt_count": 1
+  },
+  "complaints": [
+    {
+      "complaint_id": "cmp_CONV2A_0",
+      "source_message_id": "wamid.CONV2A",
+      "complaint_index": 0,
+      "complaint_type": "surge",
+      "summary": "Surge missing on 20 September.",
+      "service_date_ist": "2026-09-20",
+      "trip_ids": [],
+      "alleged_amount_rupees": null,
+      "grounding_status": "grounded",
+      "missing_fields": [],
+      "relation_kind": "new",
+      "target_dispute_id": null,
+      "grouping_key": "R027|2026-09-20|surge|wamid.CONV2A",
+      "dispute_id": "dsp_R027_surge_20",
+      "status": "accepted"
+    },
+    {
+      "complaint_id": "cmp_CONV2A_1",
+      "source_message_id": "wamid.CONV2A",
+      "complaint_index": 1,
+      "complaint_type": "cancellation_penalty",
+      "summary": "Cancellation penalty deducted twice on 21 September.",
+      "service_date_ist": "2026-09-21",
+      "trip_ids": [],
+      "alleged_amount_rupees": null,
+      "grounding_status": "grounded",
+      "missing_fields": [],
+      "relation_kind": "new",
+      "target_dispute_id": null,
+      "grouping_key": "R027|2026-09-21|cancellation_penalty|wamid.CONV2A",
+      "dispute_id": "dsp_R027_penalty_21",
+      "status": "accepted"
+    }
+  ],
+  "disputes": [
+    {
+      "dispute_id": "dsp_R027_surge_20",
+      "complaint_ids": ["cmp_CONV2A_0"],
+      "dispute_type": "surge",
+      "service_date_ist": "2026-09-20",
+      "trip_ids": ["T604546"],
+      "state": "payout_processing",
+      "revision_number": 1
+    },
+    {
+      "dispute_id": "dsp_R027_penalty_21",
+      "complaint_ids": ["cmp_CONV2A_1"],
+      "dispute_type": "cancellation_penalty",
+      "service_date_ist": "2026-09-21",
+      "trip_ids": [],
+      "state": "awaiting_approval",
+      "revision_number": 1
+    }
+  ],
+  "evidence": [],
+  "decisions": [
+    {
+      "decision_id": "dec_surge_1",
+      "dispute_id": "dsp_R027_surge_20",
+      "outcome": "auto_pay",
+      "verified_amount_rupees": 15,
+      "approval_amount_rupees": null,
+      "escalation": {"required": false, "category": "none", "reason": null},
+      "reason_codes": ["verified_shortfall"],
+      "evidence_ids": [],
+      "decided_by": "deterministic_policy_engine",
+      "policy_version": "payout-policy-v1"
+    },
+    {
+      "decision_id": "dec_penalty_1",
+      "dispute_id": "dsp_R027_penalty_21",
+      "outcome": "seek_approval",
+      "verified_amount_rupees": 10,
+      "approval_amount_rupees": 10,
+      "escalation": {"required": false, "category": "none", "reason": null},
+      "reason_codes": ["daily_auto_limit_reached"],
+      "evidence_ids": [],
+      "decided_by": "deterministic_policy_engine",
+      "policy_version": "payout-policy-v1"
+    }
+  ],
+  "actions": [
+    {
+      "action_id": "act_surge_1",
+      "decision_id": "dec_surge_1",
+      "dispute_id": "dsp_R027_surge_20",
+      "kind": "submit_payout",
+      "state": "queued",
+      "amount_rupees": 15,
+      "ops_item_id": null,
+      "payout_intent_id": "intent_surge_1"
+    },
+    {
+      "action_id": "act_penalty_1",
+      "decision_id": "dec_penalty_1",
+      "dispute_id": "dsp_R027_penalty_21",
+      "kind": "create_approval",
+      "state": "succeeded",
+      "amount_rupees": 10,
+      "ops_item_id": "ops_penalty_1",
+      "payout_intent_id": null
+    }
+  ],
+  "response": {
+    "reply": "20 Sep ka surge issue alag check hua: ₹15 processing mein hai. 21 Sep ke duplicate penalty ke ₹10 ops approval mein hain.",
+    "language": "hinglish",
+    "complaint_outcomes": [
+      {"complaint_id": "cmp_CONV2A_0", "dispute_id": "dsp_R027_surge_20", "outcome": "processing", "amount_rupees": 15, "summary": "Surge shortfall is processing."},
+      {"complaint_id": "cmp_CONV2A_1", "dispute_id": "dsp_R027_penalty_21", "outcome": "awaiting_approval", "amount_rupees": 10, "summary": "Duplicate penalty reversal awaits approval."}
+    ],
+    "claims_payment_status": "mixed",
+    "next_expected_actor": "ops"
+  },
+  "gate_runs": [],
+  "audit": {
+    "trace_id": "trace_R027_CONV2A",
+    "created_at": "2026-09-23T05:00:00Z",
+    "updated_at": "2026-09-23T05:00:02Z",
+    "prompt_version": "strict-rules-v2",
+    "model_schema_version": "2.0.0",
+    "runtime_schema_version": "2.0.0",
+    "source_snapshot_version": "assignment-export-v1"
+  }
+}

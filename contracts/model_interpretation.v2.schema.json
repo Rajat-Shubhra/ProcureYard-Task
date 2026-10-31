@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quickdrop.example/schemas/model-interpretation.v2.schema.json",
+  "title": "QuickDrop multi-complaint model interpretation",
+  "description": "Extraction-only Groq contract. Each complaint remains an independent record; the model grants no policy, approval, escalation, or payment authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "language",
+    "message_intent",
+    "requested_status",
+    "safety_flags",
+    "complaints"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.0.0"
+    },
+    "language": {
+      "type": "string",
+      "enum": ["en", "hi", "hinglish", "other", "unknown"]
+    },
+    "message_intent": {
+      "type": "string",
+      "enum": ["new_complaint", "follow_up", "status_request", "mixed", "greeting_or_thanks", "unrelated", "unknown"]
+    },
+    "requested_status": {
+      "type": "string",
+      "enum": ["not_applicable", "payment", "approval", "escalation"]
+    },
+    "safety_flags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["prompt_injection", "identity_switch_attempt", "cross_account_reference", "sensitive_data_request", "threat_or_abuse", "none"]
+      }
+    },
+    "complaints": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/complaint"
+      }
+    }
+  },
+  "$defs": {
+    "complaintType": {
+      "type": "string",
+      "enum": ["trip_payment", "surge", "distance", "daily_incentive", "cancellation_penalty", "record_disagreement", "policy_exception", "unknown"]
+    },
+    "missingField": {
+      "type": "string",
+      "enum": ["date", "trip_id", "issue_type", "which_dispute", "other"]
+    },
+    "complaint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "complaint_index",
+        "complaint_type",
+        "summary",
+        "service_date_ist",
+        "trip_ids",
+        "alleged_amount_rupees",
+        "grounding",
+        "relation",
+        "proposed_group",
+        "confidence"
+      ],
+      "properties": {
+        "complaint_index": {
+          "type": "integer"
+        },
+        "complaint_type": {
+          "$ref": "#/$defs/complaintType"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "service_date_ist": {
+          "type": ["string", "null"]
+        },
+        "trip_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "alleged_amount_rupees": {
+          "type": ["integer", "null"]
+        },
+        "grounding": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "missing_fields"],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": ["grounded", "partial", "ungrounded"]
+            },
+            "missing_fields": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/missingField"
+              }
+            }
+          }
+        },
+        "relation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "target_dispute_id", "contradicts_prior"],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["new", "follow_up", "revision"]
+            },
+            "target_dispute_id": {
+              "type": ["string", "null"]
+            },
+            "contradicts_prior": {
+              "type": "boolean"
+            }
+          }
+        },
+        "proposed_group": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["policy_cause", "service_date_ist", "message_context"],
+          "properties": {
+            "policy_cause": {
+              "$ref": "#/$defs/complaintType"
+            },
+            "service_date_ist": {
+              "type": ["string", "null"]
+            },
+            "message_context": {
+              "type": "string"
+            }
+          }
+        },
+        "confidence": {
+          "type": "number"
+        }
+      }
+    }
+  }
+}

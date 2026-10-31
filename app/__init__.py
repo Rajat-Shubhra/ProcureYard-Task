@@ -1,0 +1,3 @@
+"""QuickDrop rider payout dispute desk."""
+
+__version__ = "0.1.0"

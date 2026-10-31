@@ -1,0 +1,55 @@
+{
+  "schema_version": "2.0.0",
+  "language": "hinglish",
+  "message_intent": "new_complaint",
+  "requested_status": "not_applicable",
+  "safety_flags": ["none"],
+  "complaints": [
+    {
+      "complaint_index": 0,
+      "complaint_type": "surge",
+      "summary": "Rider says surge was missing on 20 September.",
+      "service_date_ist": "2026-09-20",
+      "trip_ids": [],
+      "alleged_amount_rupees": null,
+      "grounding": {
+        "status": "grounded",
+        "missing_fields": []
+      },
+      "relation": {
+        "kind": "new",
+        "target_dispute_id": null,
+        "contradicts_prior": false
+      },
+      "proposed_group": {
+        "policy_cause": "surge",
+        "service_date_ist": "2026-09-20",
+        "message_context": "current_message"
+      },
+      "confidence": 0.98
+    },
+    {
+      "complaint_index": 1,
+      "complaint_type": "cancellation_penalty",
+      "summary": "Rider says a cancellation penalty was deducted twice on 21 September.",
+      "service_date_ist": "2026-09-21",
+      "trip_ids": [],
+      "alleged_amount_rupees": null,
+      "grounding": {
+        "status": "grounded",
+        "missing_fields": []
+      },
+      "relation": {
+        "kind": "new",
+        "target_dispute_id": null,
+        "contradicts_prior": false
+      },
+      "proposed_group": {
+        "policy_cause": "cancellation_penalty",
+        "service_date_ist": "2026-09-21",
+        "message_context": "current_message"
+      },
+      "confidence": 0.98
+    }
+  ]
+}

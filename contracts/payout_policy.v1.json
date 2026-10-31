@@ -1,0 +1,135 @@
+{
+  "schema_version": "1.0.0",
+  "policy_version": "payout-policy-v1",
+  "normalization_version": "source-normalization-v1",
+  "timezone": "Asia/Kolkata",
+  "eligibility_window": {
+    "anchor": "message.received_at",
+    "calendar_timezone": "Asia/Kolkata",
+    "inclusive_calendar_days": 7,
+    "interpretation": "The received IST date and the previous six IST dates are eligible.",
+    "future_dates_eligible": false
+  },
+  "trip_fare": {
+    "eligible_status": "completed",
+    "base_rupees": 25,
+    "included_distance_km": 2,
+    "rupees_per_extra_km": 6,
+    "surge_applies_to": "base_plus_distance",
+    "formula": "(25 + 6 * max(distance_km - 2, 0)) * surge_multiplier",
+    "rounding": {
+      "scope": "each_trip",
+      "mode": "nearest_rupee_half_up",
+      "non_negative_implementation": "floor(value + 0.5)"
+    }
+  },
+  "daily_incentive": {
+    "amount_rupees": 150,
+    "minimum_completed_distinct_trips": 12,
+    "calendar_timezone": "Asia/Kolkata",
+    "cancelled_trips_count": false
+  },
+  "cancellations": {
+    "cancelled_by_rider": {
+      "amount_rupees": -10,
+      "kind": "cancellation_penalty"
+    },
+    "cancelled_by_customer": {
+      "amount_rupees": 0,
+      "kind": "no_earning_no_penalty"
+    },
+    "exceptions_are_automatic": false
+  },
+  "reconciliation": {
+    "historical_baseline_source": "payout_lines_export",
+    "new_adjustment_authority": "payswift",
+    "shortfall_formula": "max(expected_total - actual_total, 0)",
+    "allow_negative_payout": false,
+    "automatic_clawback": false,
+    "claimed_amount_is_authoritative": false
+  },
+  "auto_payment": {
+    "maximum_rupees_per_verified_dispute": 200,
+    "maximum_disputes_per_rider_per_ist_action_day": 1,
+    "amount_above_maximum": "approval",
+    "repeat_same_day": "approval",
+    "unknown_or_unverified_amount": "escalation",
+    "approval_requires_full_revalidation": true
+  },
+  "dispute_grouping": {
+    "group_when_all_match": [
+      "envelope_rider_id",
+      "service_date_ist",
+      "policy_cause",
+      "message_context"
+    ],
+    "split_when_any_differ": [
+      "service_date_ist",
+      "policy_cause"
+    ],
+    "never_group_to_bypass_limits": true
+  },
+  "identity": {
+    "trusted_source": "message_envelope.rider_id",
+    "message_text_can_change_identity": false,
+    "trip_ownership_required": true,
+    "cross_account_disclosure_allowed": false
+  },
+  "source_normalization": {
+    "rules": [
+      {
+        "rule_id": "normalize-rider-id-v1",
+        "field": "trip.rider_id",
+        "condition": "case-insensitive R followed by digits and exactly one canonical roster match",
+        "transform": "uppercase R plus zero-pad numeric part to three digits",
+        "examples": {
+          "R7": "R007",
+          "r19": "R019"
+        },
+        "on_ambiguous": "escalate"
+      },
+      {
+        "rule_id": "normalize-distance-unit-v1",
+        "field": "trip.distance_km",
+        "condition": "raw numeric value greater than 100",
+        "transform": "divide by 1000",
+        "valid_normalized_range_km": {
+          "minimum": 0.1,
+          "maximum": 100
+        },
+        "on_out_of_range": "escalate"
+      },
+      {
+        "rule_id": "deduplicate-identical-trip-v1",
+        "field": "trip",
+        "condition": "same trip_id and all exported fields exactly equal",
+        "transform": "use one logical trip for calculations and retain all raw rows as evidence",
+        "on_conflict": "escalate"
+      },
+      {
+        "rule_id": "utc-to-ist-service-date-v1",
+        "field": "trip.started_at",
+        "condition": "valid timezone-aware timestamp",
+        "transform": "convert instant to Asia/Kolkata before taking calendar date",
+        "on_invalid": "escalate"
+      }
+    ],
+    "trace_raw_and_normalized_values": true,
+    "llm_may_normalize_source_data": false
+  },
+  "decision_classes": {
+    "auto_pay": "Known positive shortfall; all deterministic gates pass; within amount and daily limits.",
+    "approval": "Known positive shortfall blocked only by amount or daily auto-payment limit.",
+    "escalation": "Facts, ownership, data quality, policy exception, security, or provider state requires human investigation.",
+    "explain_no_shortfall": "Evidence supports zero positive shortfall.",
+    "ask_clarification": "The claim lacks essential grounding.",
+    "processing": "A provider result is ambiguous or durable work remains pending."
+  },
+  "provider_safety": {
+    "stable_idempotency_key_required": true,
+    "persist_intent_before_network_call": true,
+    "same_key_requires_same_body": true,
+    "ambiguous_results_require_ledger_reconciliation": true,
+    "paid_wording_requires_provider_confirmation": true
+  }
+}

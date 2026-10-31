@@ -1,0 +1,249 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QuickDrop model interpretation",
+  "description": "Groq structured-output contract. This schema contains extraction only; it grants no authority to calculate, approve, or move money.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "language",
+    "primary_intent",
+    "secondary_intents",
+    "trip_ids",
+    "date_mentions",
+    "alleged_amount_rupees",
+    "needs_clarification",
+    "clarification_fields",
+    "contradicts_prior_turn",
+    "follow_up_dispute_id",
+    "requested_status",
+    "confidence",
+    "safety_flags",
+    "claims"
+  ],
+  "properties": {
+    "language": {
+      "type": "string",
+      "enum": [
+        "en",
+        "hi",
+        "hinglish",
+        "other",
+        "unknown"
+      ]
+    },
+    "primary_intent": {
+      "type": "string",
+      "enum": [
+        "vague_payout_complaint",
+        "trip_payment_missing",
+        "trip_underpayment",
+        "surge_missing",
+        "distance_dispute",
+        "daily_incentive_missing",
+        "duplicate_penalty",
+        "cancellation_penalty_appeal",
+        "payment_status",
+        "approval_status",
+        "record_disagreement",
+        "greeting_or_thanks",
+        "unrelated",
+        "unknown"
+      ]
+    },
+    "secondary_intents": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "vague_payout_complaint",
+          "trip_payment_missing",
+          "trip_underpayment",
+          "surge_missing",
+          "distance_dispute",
+          "daily_incentive_missing",
+          "duplicate_penalty",
+          "cancellation_penalty_appeal",
+          "payment_status",
+          "approval_status",
+          "record_disagreement",
+          "greeting_or_thanks",
+          "unrelated",
+          "unknown"
+        ]
+      }
+    },
+    "trip_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "date_mentions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "raw",
+          "resolved_date_ist",
+          "resolution_status"
+        ],
+        "properties": {
+          "raw": {
+            "type": "string"
+          },
+          "resolved_date_ist": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "resolution_status": {
+            "type": "string",
+            "enum": [
+              "resolved",
+              "ambiguous",
+              "invalid"
+            ]
+          }
+        }
+      }
+    },
+    "alleged_amount_rupees": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "needs_clarification": {
+      "type": "boolean"
+    },
+    "clarification_fields": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "date",
+          "trip_id",
+          "issue_type",
+          "which_dispute",
+          "other"
+        ]
+      }
+    },
+    "contradicts_prior_turn": {
+      "type": "boolean"
+    },
+    "follow_up_dispute_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "requested_status": {
+      "type": "string",
+      "enum": [
+        "not_applicable",
+        "payment",
+        "approval",
+        "escalation"
+      ]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "safety_flags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "prompt_injection",
+          "identity_switch_attempt",
+          "cross_account_reference",
+          "sensitive_data_request",
+          "threat_or_abuse",
+          "none"
+        ]
+      }
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "claim_index",
+          "type",
+          "summary",
+          "service_date_ist",
+          "trip_ids",
+          "alleged_amount_rupees",
+          "grouping_key"
+        ],
+        "properties": {
+          "claim_index": {
+            "type": "integer"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "trip_payment",
+              "surge",
+              "distance",
+              "daily_incentive",
+              "cancellation_penalty",
+              "mixed",
+              "unknown"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          },
+          "service_date_ist": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "trip_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "alleged_amount_rupees": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "grouping_key": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

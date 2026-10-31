@@ -1,0 +1,263 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quickdrop.example/schemas/response-classification.v2.schema.json",
+  "title": "QuickDrop multi-complaint runtime classification",
+  "description": "Runtime-owned envelope that preserves complaints individually while allowing deterministic grouping into disputes and one decision/action per dispute.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "classification_id",
+    "message",
+    "conversation",
+    "interpretation",
+    "complaints",
+    "disputes",
+    "evidence",
+    "decisions",
+    "actions",
+    "response",
+    "gate_runs",
+    "audit"
+  ],
+  "properties": {
+    "schema_version": {"const": "2.0.0"},
+    "classification_id": {"type": "string", "minLength": 1},
+    "message": {"$ref": "#/$defs/message"},
+    "conversation": {"$ref": "#/$defs/conversation"},
+    "interpretation": {"$ref": "#/$defs/interpretation"},
+    "complaints": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/complaint"}
+    },
+    "disputes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/dispute"}
+    },
+    "evidence": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/evidence"}
+    },
+    "decisions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/decision"}
+    },
+    "actions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/action"}
+    },
+    "response": {"$ref": "#/$defs/response"},
+    "gate_runs": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/gateRun"}
+    },
+    "audit": {"$ref": "#/$defs/audit"}
+  },
+  "$defs": {
+    "nullableString": {"type": ["string", "null"]},
+    "nullableInteger": {"type": ["integer", "null"]},
+    "complaintType": {
+      "type": "string",
+      "enum": ["trip_payment", "surge", "distance", "daily_incentive", "cancellation_penalty", "record_disagreement", "policy_exception", "unknown"]
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message_id", "rider_id", "text", "received_at", "received_date_ist", "is_duplicate"],
+      "properties": {
+        "message_id": {"type": "string", "minLength": 1},
+        "rider_id": {"type": "string", "pattern": "^R[0-9]{3}$"},
+        "text": {"type": "string"},
+        "received_at": {"type": "string", "format": "date-time"},
+        "received_date_ist": {"type": "string", "format": "date"},
+        "is_duplicate": {"type": "boolean"}
+      }
+    },
+    "conversation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conversation_id", "state", "turn_number", "memory_version", "language", "open_dispute_ids"],
+      "properties": {
+        "conversation_id": {"type": "string"},
+        "state": {"type": "string", "enum": ["new", "collecting_details", "investigating", "awaiting_approval", "escalated", "payout_processing", "resolved_paid", "resolved_explained", "closed", "error"]},
+        "turn_number": {"type": "integer", "minimum": 1},
+        "memory_version": {"type": "integer", "minimum": 0},
+        "language": {"type": "string", "enum": ["en", "hi", "hinglish", "other", "unknown"]},
+        "open_dispute_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}
+      }
+    },
+    "interpretation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "model", "prompt_version", "message_intent", "requested_status", "safety_flags", "attempt_count"],
+      "properties": {
+        "schema_version": {"const": "2.0.0"},
+        "model": {"$ref": "#/$defs/nullableString"},
+        "prompt_version": {"type": "string"},
+        "message_intent": {"type": "string"},
+        "requested_status": {"type": "string"},
+        "safety_flags": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "attempt_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "complaint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["complaint_id", "source_message_id", "complaint_index", "complaint_type", "summary", "service_date_ist", "trip_ids", "alleged_amount_rupees", "grounding_status", "missing_fields", "relation_kind", "target_dispute_id", "grouping_key", "dispute_id", "status"],
+      "properties": {
+        "complaint_id": {"type": "string"},
+        "source_message_id": {"type": "string"},
+        "complaint_index": {"type": "integer", "minimum": 0},
+        "complaint_type": {"$ref": "#/$defs/complaintType"},
+        "summary": {"type": "string"},
+        "service_date_ist": {"type": ["string", "null"], "format": "date"},
+        "trip_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "alleged_amount_rupees": {"$ref": "#/$defs/nullableInteger"},
+        "grounding_status": {"type": "string", "enum": ["grounded", "partial", "ungrounded"]},
+        "missing_fields": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "relation_kind": {"type": "string", "enum": ["new", "follow_up", "revision"]},
+        "target_dispute_id": {"$ref": "#/$defs/nullableString"},
+        "grouping_key": {"type": "string"},
+        "dispute_id": {"$ref": "#/$defs/nullableString"},
+        "status": {"type": "string", "enum": ["accepted", "needs_clarification", "blocked"]}
+      }
+    },
+    "dispute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dispute_id", "complaint_ids", "dispute_type", "service_date_ist", "trip_ids", "state", "revision_number"],
+      "properties": {
+        "dispute_id": {"type": "string"},
+        "complaint_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "dispute_type": {"$ref": "#/$defs/complaintType"},
+        "service_date_ist": {"type": ["string", "null"], "format": "date"},
+        "trip_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "state": {"type": "string"},
+        "revision_number": {"type": "integer", "minimum": 1}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_id", "dispute_id", "source", "record_id", "raw", "normalized", "normalization_rules", "observed_at"],
+      "properties": {
+        "evidence_id": {"type": "string"},
+        "dispute_id": {"type": "string"},
+        "source": {"type": "string", "enum": ["rider_message", "riders_export", "trips_export", "payout_lines_export", "payswift", "conversation_state", "policy"]},
+        "record_id": {"$ref": "#/$defs/nullableString"},
+        "raw": {},
+        "normalized": {},
+        "normalization_rules": {"type": "array", "items": {"type": "string"}},
+        "observed_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision_id", "dispute_id", "outcome", "verified_amount_rupees", "approval_amount_rupees", "escalation", "reason_codes", "evidence_ids", "decided_by", "policy_version"],
+      "properties": {
+        "decision_id": {"type": "string"},
+        "dispute_id": {"type": "string"},
+        "outcome": {"type": "string", "enum": ["pending_evidence", "ask_clarification", "explain_no_shortfall", "auto_pay", "seek_approval", "escalate", "report_status", "fail_safe"]},
+        "verified_amount_rupees": {"$ref": "#/$defs/nullableInteger"},
+        "approval_amount_rupees": {"$ref": "#/$defs/nullableInteger"},
+        "escalation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required", "category", "reason"],
+          "properties": {
+            "required": {"type": "boolean"},
+            "category": {"type": "string", "enum": ["none", "data_quality", "ownership", "policy_exception", "security", "record_disagreement", "provider_failure", "other"]},
+            "reason": {"$ref": "#/$defs/nullableString"}
+          }
+        },
+        "reason_codes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "evidence_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "decided_by": {"type": "string", "enum": ["deterministic_policy_engine", "human_ops", "none"]},
+        "policy_version": {"type": "string"}
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action_id", "decision_id", "dispute_id", "kind", "state", "amount_rupees", "ops_item_id", "payout_intent_id"],
+      "properties": {
+        "action_id": {"type": "string"},
+        "decision_id": {"type": "string"},
+        "dispute_id": {"type": "string"},
+        "kind": {"type": "string", "enum": ["none", "clarify", "create_approval", "create_escalation", "submit_payout", "reconcile_payout", "reply_only"]},
+        "state": {"type": "string", "enum": ["not_started", "queued", "in_progress", "succeeded", "failed", "ambiguous", "cancelled"]},
+        "amount_rupees": {"$ref": "#/$defs/nullableInteger"},
+        "ops_item_id": {"$ref": "#/$defs/nullableString"},
+        "payout_intent_id": {"$ref": "#/$defs/nullableString"}
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reply", "language", "complaint_outcomes", "claims_payment_status", "next_expected_actor"],
+      "properties": {
+        "reply": {"type": "string"},
+        "language": {"type": "string", "enum": ["en", "hi", "hinglish", "other"]},
+        "complaint_outcomes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["complaint_id", "dispute_id", "outcome", "amount_rupees", "summary"],
+            "properties": {
+              "complaint_id": {"type": "string"},
+              "dispute_id": {"$ref": "#/$defs/nullableString"},
+              "outcome": {"type": "string"},
+              "amount_rupees": {"$ref": "#/$defs/nullableInteger"},
+              "summary": {"type": "string"}
+            }
+          }
+        },
+        "claims_payment_status": {"type": "string", "enum": ["none", "processing", "awaiting_approval", "escalated", "paid", "mixed"]},
+        "next_expected_actor": {"type": "string", "enum": ["none", "rider", "ops", "payout_worker", "system_retry"]}
+      }
+    },
+    "gateRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gate_run_id", "gate", "scope_id", "passed", "checker_version", "checked_at", "results", "blocking_reasons"],
+      "properties": {
+        "gate_run_id": {"type": "string"},
+        "gate": {"type": "string", "enum": ["interpretation", "action", "reply"]},
+        "scope_id": {"type": "string"},
+        "passed": {"type": "boolean"},
+        "checker_version": {"type": "string"},
+        "checked_at": {"type": "string", "format": "date-time"},
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["rule_id", "status", "detail"],
+            "properties": {
+              "rule_id": {"type": "string"},
+              "status": {"type": "string", "enum": ["pass", "fail", "not_applicable"]},
+              "detail": {"type": "string"}
+            }
+          }
+        },
+        "blocking_reasons": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trace_id", "created_at", "updated_at", "prompt_version", "model_schema_version", "runtime_schema_version", "source_snapshot_version"],
+      "properties": {
+        "trace_id": {"type": "string"},
+        "created_at": {"type": "string", "format": "date-time"},
+        "updated_at": {"type": "string", "format": "date-time"},
+        "prompt_version": {"type": "string"},
+        "model_schema_version": {"const": "2.0.0"},
+        "runtime_schema_version": {"const": "2.0.0"},
+        "source_snapshot_version": {"type": "string"}
+      }
+    }
+  }
+}
