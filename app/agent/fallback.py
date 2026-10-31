@@ -15,6 +15,11 @@ IST = ZoneInfo("Asia/Kolkata")
 TRIP_RE = re.compile(r"\bT\d+\b", re.IGNORECASE)
 AMOUNT_RE = re.compile(r"(?:₹|rs\.?|rupay|rupees?)\s*(\d+)|\b(\d+)\s*(?:rupay|rupees?)", re.I)
 DAY_RE = re.compile(r"\b([12]?\d|3[01])(?:st|nd|rd|th)?\b", re.I)
+GREETING_RE = re.compile(
+    r"(?:(?:ok|okay|okk|thik hai|theek hai|thanks|thank you|thankyou|thx|shukriya|dhanyavad|"
+    r"dhanyawad|ji|haan|hmm|great|good|👍|🙏)[\s\W]*)+",
+    re.IGNORECASE,
+)
 
 
 class HeuristicInterpretationProvider:
@@ -42,7 +47,10 @@ def build_fallback_payload(context: InterpretationContext) -> dict[str, Any]:
     amount = _amount(text)
     open_disputes = context.open_disputes
 
-    if not complaint_specs and open_disputes and requested_status == "not_applicable":
+    greeting_only = bool(GREETING_RE.fullmatch(lowered.strip()))
+    if greeting_only:
+        complaint_specs = []
+    elif not complaint_specs and open_disputes and requested_status == "not_applicable":
         complaint_specs = [("unknown", "Follow-up on an existing payout complaint.")]
 
     complaints: list[dict[str, Any]] = []
@@ -87,7 +95,9 @@ def build_fallback_payload(context: InterpretationContext) -> dict[str, Any]:
         )
 
     message_intent = "status_request" if requested_status != "not_applicable" else "new_complaint"
-    if open_disputes and complaints:
+    if greeting_only:
+        message_intent = "greeting_or_thanks"
+    elif open_disputes and complaints:
         message_intent = "follow_up"
     if len(complaints) > 1:
         message_intent = "mixed"
@@ -139,14 +149,36 @@ def _complaint_specs(text: str) -> list[tuple[str, str]]:
     return specs
 
 
+NOT_A_DAY_AFTER_RE = re.compile(
+    r"\s*(?:\.\d|order|trip|rupay|rupaye|rupees?|rs\b|₹|kiye|kiya|baar|"
+    r"km\b|kms\b|x\b|%|se\s+zyada|complete)",
+    re.IGNORECASE,
+)
+NOT_A_DAY_BEFORE_RE = re.compile(r"(?:₹|rs\.?|rupay|rupees?)\s*$|[.,:/\d]$", re.IGNORECASE)
+WALA_AFTER_RE = re.compile(r"\s*wal[aei]\b", re.IGNORECASE)
+
+
 def _dates(text: str, context: InterpretationContext) -> list[str]:
     received = context.envelope.received_at.astimezone(IST)
-    if "kal" in text:
+    if re.search(r"\bkal\b", text):
         return [(received.date() - timedelta(days=1)).isoformat()]
+    if re.search(r"\baaj\b", text):
+        return [received.date().isoformat()]
+    if re.search(r"\bparso\b", text):
+        return [(received.date() - timedelta(days=2)).isoformat()]
+    # "10 wala" is ambiguous: "the ₹10 one" when an open dispute carries that amount,
+    # otherwise "the 10th's" (a date).
+    open_amounts = {
+        int(item["amount"]) for item in context.open_disputes if item.get("amount") is not None
+    }
     days = []
     for match in DAY_RE.finditer(text):
-        following = text[match.end() : match.end() + 10]
-        if re.match(r"\s*(?:order|trip)", following):
+        following = text[match.end() : match.end() + 14]
+        preceding = text[max(0, match.start() - 8) : match.start()]
+        if NOT_A_DAY_AFTER_RE.match(following) or NOT_A_DAY_BEFORE_RE.search(preceding):
+            # "12 kiye the", "2 baar", "7.4 km", "Rs 25", "20/9" are not dates.
+            continue
+        if WALA_AFTER_RE.match(following) and int(match.group(1)) in open_amounts:
             continue
         days.append(int(match.group(1)))
     dates: list[str] = []
@@ -157,7 +189,10 @@ def _dates(text: str, context: InterpretationContext) -> list[str]:
             continue
         if candidate > received.date() + timedelta(days=1):
             previous_month = (received.replace(day=1) - timedelta(days=1)).date()
-            candidate = previous_month.replace(day=day)
+            try:
+                candidate = previous_month.replace(day=day)
+            except ValueError:
+                continue
         value = candidate.isoformat()
         if value not in dates:
             dates.append(value)

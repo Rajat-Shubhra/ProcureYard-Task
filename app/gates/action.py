@@ -32,10 +32,16 @@ class ActionProposal:
     escalation_category: str | None = None
     escalation_reason: str | None = None
     human_approval_present: bool = False
+    # Gate B rule 9: money already queued/paid/awaiting approval for the same evidence.
+    already_covered: bool = False
+    committed_amount: int = 0
+
+
+AUTO_PAY_LIMIT_RUPEES = 200
 
 
 class ActionGate:
-    checker_version = "action-gate-v1"
+    checker_version = "action-gate-v2"
 
     def check(self, proposal: ActionProposal) -> GateReport:
         monetary = proposal.kind in {"submit_payout", "create_approval"}
@@ -82,10 +88,23 @@ class ActionGate:
                         "No positive verified shortfall exists.",
                     ),
                     _required(
+                        "money.whole_rupee",
+                        isinstance(proposal.proposed_amount, int)
+                        and not isinstance(proposal.proposed_amount, bool),
+                        "Proposed amount is a whole-rupee integer.",
+                        "Proposed amount is not a whole-rupee integer.",
+                    ),
+                    _required(
                         "money.proposal_matches_shortfall",
                         proposal.proposed_amount == proposal.verified_shortfall,
                         "Proposed amount exactly matches the verified shortfall.",
                         "Proposed amount differs from the verified shortfall.",
+                    ),
+                    _required(
+                        "money.not_already_covered",
+                        not proposal.already_covered,
+                        "No prior payout, intent or approval already covers this shortfall.",
+                        "A prior payout, intent or approval already covers this shortfall.",
                     ),
                     _required(
                         "provider.amount_bounds",
@@ -104,11 +123,14 @@ class ActionGate:
                     "policy.window_eligible",
                     "evidence.complete_and_unambiguous",
                     "money.positive_verified_shortfall",
+                    "money.whole_rupee",
                     "money.proposal_matches_shortfall",
+                    "money.not_already_covered",
                     "provider.amount_bounds",
                 )
             )
 
+        cumulative = (proposal.proposed_amount or 0) + max(proposal.committed_amount, 0)
         if proposal.kind == "submit_payout":
             if proposal.origin == "human_ops":
                 results.extend(
@@ -129,9 +151,9 @@ class ActionGate:
                         _required(
                             "money.auto_limit",
                             proposal.proposed_amount is not None
-                            and proposal.proposed_amount <= 200,
-                            "Amount is within the ₹200 automatic-payment limit.",
-                            "Amount exceeds the automatic-payment limit.",
+                            and cumulative <= AUTO_PAY_LIMIT_RUPEES,
+                            "Cumulative amount is within the ₹200 automatic-payment limit.",
+                            "Cumulative amount exceeds the automatic-payment limit.",
                         ),
                         _required(
                             "money.daily_auto_limit",
@@ -147,7 +169,7 @@ class ActionGate:
                     _required(
                         "provider.reconciled",
                         proposal.payswift_reconciled,
-                        "PaySwift ledger was reconciled before action.",
+                        "PaySwift ledger was fetched and reconciled before action.",
                         "PaySwift ledger has not been reconciled.",
                     ),
                     _required(
@@ -160,7 +182,7 @@ class ActionGate:
             )
         elif proposal.kind == "create_approval":
             approval_needed = proposal.proposed_amount is not None and (
-                proposal.proposed_amount > 200 or proposal.prior_auto_payment_today
+                cumulative > AUTO_PAY_LIMIT_RUPEES or proposal.prior_auto_payment_today
             )
             results.append(
                 _required(

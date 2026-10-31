@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import NormalizedTrip, PayoutLine
+from app.models import NormalizedTrip, PayoutLine, SourceFinding
 
 IST = ZoneInfo("Asia/Kolkata")
 POLICY_VERSION = "payout-policy-v1"
@@ -77,14 +77,53 @@ class PayoutPolicyEngine:
         trip_ids: tuple[str, ...],
         received_at: datetime,
     ) -> DisputeEvaluation:
-        trips, ownership = self._load_trips(
+        trips, ownership, source_conflict = self._load_trips(
             session,
             rider_id=rider_id,
             service_date_ist=service_date_ist,
             trip_ids=trip_ids,
             complaint_type=complaint_type,
         )
-        effective_date = self._effective_date(service_date_ist, trips)
+        if source_conflict:
+            # A named trip exists in the raw export but was rejected/quarantined at import
+            # (conflicting rows). Money is blocked and a human must look at the source.
+            return DisputeEvaluation(
+                complaint_type=complaint_type,
+                rider_id=rider_id,
+                service_date_ist=service_date_ist,
+                trip_ids=trip_ids,
+                ownership="unknown",
+                policy_window="unknown",
+                expected_components=(),
+                actual_components=(),
+                expected_total=None,
+                actual_total=None,
+                verified_shortfall=None,
+                completed_trip_count=None,
+                evidence_complete=True,
+                source_ambiguous=True,
+                reason_codes=("conflicting_source_rows",),
+                data_quality_flags=("source_conflict",),
+            )
+        extra_flags: tuple[str, ...] = ()
+        if trip_ids and trips and ownership == "verified":
+            # Evidence decides the service date; the rider's claimed date is only traced.
+            evidence_dates = {trip.service_date_ist for trip in trips}
+            if len(evidence_dates) != 1:
+                return self._unverified(
+                    complaint_type,
+                    rider_id,
+                    None,
+                    trip_ids,
+                    ownership,
+                    "unknown",
+                    reason="multiple_service_dates",
+                )
+            effective_date = next(iter(evidence_dates))
+            if service_date_ist is not None and service_date_ist != effective_date:
+                extra_flags = ("claimed_date_mismatch",)
+        else:
+            effective_date = self._effective_date(service_date_ist, trips)
         window = policy_window(effective_date, received_at)
 
         if complaint_type == "daily_incentive":
@@ -110,7 +149,7 @@ class PayoutPolicyEngine:
                     if complaint_type == "policy_exception"
                     else "record_disagreement",
                 ),
-                data_quality_flags=_quality_flags(trips),
+                data_quality_flags=_quality_flags(trips) + extra_flags,
             )
         if ownership != "verified" or not trips:
             return self._unverified(
@@ -151,8 +190,15 @@ class PayoutPolicyEngine:
         expected_total = sum(item.amount for item in expected)
         actual_total = sum(item.amount for item in actual)
         shortfall = max(expected_total - actual_total, 0)
-        evidence_complete = bool(selected_ids) and window != "unknown"
-        reasons = ("verified_shortfall",) if shortfall else ("no_shortfall",)
+        # A date-only claim whose trips are all correctly paid is a verified zero shortfall,
+        # not missing grounding: the rider gets an explanation, not another question.
+        evidence_complete = (bool(selected_ids) or bool(relevant)) and window != "unknown"
+        if shortfall:
+            reasons: tuple[str, ...] = ("verified_shortfall",)
+        elif relevant:
+            reasons = ("no_shortfall",)
+        else:
+            reasons = ("no_matching_trips",)
         return DisputeEvaluation(
             complaint_type=complaint_type,
             rider_id=rider_id,
@@ -169,7 +215,7 @@ class PayoutPolicyEngine:
             evidence_complete=evidence_complete,
             source_ambiguous=False,
             reason_codes=reasons,
-            data_quality_flags=_quality_flags(relevant),
+            data_quality_flags=_quality_flags(relevant) + extra_flags,
         )
 
     def _load_trips(
@@ -180,18 +226,25 @@ class PayoutPolicyEngine:
         service_date_ist: date | None,
         trip_ids: tuple[str, ...],
         complaint_type: str,
-    ) -> tuple[list[NormalizedTrip], Ownership]:
+    ) -> tuple[list[NormalizedTrip], Ownership, bool]:
         if trip_ids:
             trips = list(
                 session.scalars(select(NormalizedTrip).where(NormalizedTrip.trip_id.in_(trip_ids)))
             )
             if len(trips) != len(set(trip_ids)):
-                return trips, "unknown"
+                missing = set(trip_ids) - {trip.trip_id for trip in trips}
+                conflicted = session.scalar(
+                    select(SourceFinding.finding_id).where(
+                        SourceFinding.requires_escalation.is_(True),
+                        SourceFinding.record_key.in_(missing),
+                    )
+                )
+                return trips, "unknown", conflicted is not None
             if any(trip.rider_id != rider_id for trip in trips):
-                return [], "mismatch"
-            return trips, "verified"
+                return [], "mismatch", False
+            return trips, "verified", False
         if service_date_ist is None:
-            return [], "unknown"
+            return [], "unknown", False
         status_filter = (
             NormalizedTrip.status == "cancelled_by_rider"
             if complaint_type in {"cancellation_penalty", "policy_exception"}
@@ -206,7 +259,7 @@ class PayoutPolicyEngine:
                 )
             )
         )
-        return trips, "verified"
+        return trips, "verified", False
 
     def _daily_incentive(
         self,
@@ -277,8 +330,11 @@ class PayoutPolicyEngine:
         trip_ids: tuple[str, ...],
         ownership: Ownership,
         window: PolicyWindow,
+        *,
+        reason: str | None = None,
     ) -> DisputeEvaluation:
-        reason = "ownership_mismatch" if ownership == "mismatch" else "missing_grounding"
+        if reason is None:
+            reason = "ownership_mismatch" if ownership == "mismatch" else "missing_grounding"
         return DisputeEvaluation(
             complaint_type=complaint_type,
             rider_id=rider_id,
