@@ -83,7 +83,8 @@ class OpsService:
             if session.bind is not None and session.bind.dialect.name == "postgresql":
                 statement = statement.with_for_update()
             item = session.scalar(statement)
-            assert item is not None
+            if item is None:
+                raise OpsNotFoundError(item_id)
             if item.status == "approved":
                 intent = session.scalar(
                     select(PayoutIntent).where(PayoutIntent.decision_id == item.decision_id)
@@ -222,14 +223,24 @@ class OpsService:
             return OpsResult(item_id, "approved", intent.intent_id)
 
     def reject(self, item_id: str, reviewer: str, note: str | None) -> OpsResult:
+        with self.database.session() as session:
+            item = session.get(OpsItem, item_id)
+            if item is None:
+                raise OpsNotFoundError(item_id)
+            if item.status == "rejected":
+                return OpsResult(item_id, "rejected")
+            if item.status != "pending":
+                raise OpsConflictError("Ops item already has a different terminal decision")
+            rider_id = item.rider_id
+
         with self.database.session() as session, session.begin():
+            lock_rider(session, rider_id)
             statement = select(OpsItem).where(OpsItem.item_id == item_id)
             if session.bind is not None and session.bind.dialect.name == "postgresql":
                 statement = statement.with_for_update()
             item = session.scalar(statement)
             if item is None:
                 raise OpsNotFoundError(item_id)
-            lock_rider(session, item.rider_id)
             if item.status == "rejected":
                 return OpsResult(item_id, "rejected")
             if item.status != "pending":
@@ -258,14 +269,20 @@ class OpsService:
         The intent keeps its idempotency key, body fingerprint and reference, so PaySwift
         sees the same request again (or a reconcile-before-submit finds the earlier payout).
         """
+        with self.database.session() as session:
+            item = session.get(OpsItem, item_id)
+            if item is None:
+                raise OpsNotFoundError(item_id)
+            rider_id = item.rider_id
+
         with self.database.session() as session, session.begin():
+            lock_rider(session, rider_id)
             statement = select(OpsItem).where(OpsItem.item_id == item_id)
             if session.bind is not None and session.bind.dialect.name == "postgresql":
                 statement = statement.with_for_update()
             item = session.scalar(statement)
             if item is None:
                 raise OpsNotFoundError(item_id)
-            lock_rider(session, item.rider_id)
             if not item.logical_key.startswith(PROVIDER_FAILURE_PREFIX):
                 raise OpsConflictError("Only provider-failure escalations can retry a payout")
             intent_id = item.logical_key[len(PROVIDER_FAILURE_PREFIX) :]

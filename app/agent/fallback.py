@@ -56,7 +56,13 @@ def build_fallback_payload(context: InterpretationContext) -> dict[str, Any]:
     complaints: list[dict[str, Any]] = []
     for index, (complaint_type, summary) in enumerate(complaint_specs):
         service_date = service_dates[min(index, len(service_dates) - 1)] if service_dates else None
-        target = _follow_up_target(open_disputes, complaint_type, amount)
+        target = _follow_up_target(
+            open_disputes,
+            complaint_type,
+            service_date=service_date,
+            trip_ids=trip_ids,
+            amount=amount,
+        )
         if target and complaint_type == "unknown":
             prior = next(item for item in open_disputes if item.get("dispute_id") == target)
             complaint_type = str(prior.get("dispute_type") or "unknown")
@@ -97,7 +103,7 @@ def build_fallback_payload(context: InterpretationContext) -> dict[str, Any]:
     message_intent = "status_request" if requested_status != "not_applicable" else "new_complaint"
     if greeting_only:
         message_intent = "greeting_or_thanks"
-    elif open_disputes and complaints:
+    elif any(item["relation"]["kind"] != "new" for item in complaints):
         message_intent = "follow_up"
     if len(complaints) > 1:
         message_intent = "mixed"
@@ -113,21 +119,28 @@ def build_fallback_payload(context: InterpretationContext) -> dict[str, Any]:
     }
 
 
+def _first_pos(text: str, tokens: tuple[str, ...]) -> int | None:
+    positions = [pos for token in tokens if (pos := text.find(token)) >= 0]
+    return min(positions) if positions else None
+
+
 def _complaint_specs(text: str) -> list[tuple[str, str]]:
-    specs: list[tuple[str, str]] = []
-    if "surge" in text:
-        specs.append(("surge", "Rider reports missing surge payment."))
-    if any(token in text for token in ("distance", " km")) and "got only" not in text:
-        specs.append(("distance", "Rider disputes the recorded trip distance."))
-    if any(token in text for token in ("incentive", "12 order", "12 se zyada")):
-        specs.append(("daily_incentive", "Rider reports a missing daily incentive."))
-    if "penalty" in text or "cancel" in text:
+    positioned: list[tuple[int, str, str]] = []
+    if (pos := _first_pos(text, ("surge",))) is not None:
+        positioned.append((pos, "surge", "Rider reports missing surge payment."))
+    if (pos := _first_pos(text, ("distance", " km"))) is not None and "got only" not in text:
+        positioned.append((pos, "distance", "Rider disputes the recorded trip distance."))
+    if (pos := _first_pos(text, ("incentive", "12 order", "12 se zyada"))) is not None:
+        positioned.append((pos, "daily_incentive", "Rider reports a missing daily incentive."))
+    if (pos := _first_pos(text, ("penalty", "cancel"))) is not None:
         complaint_type = (
             "policy_exception"
             if any(token in text for token in ("accident", "exception", "kyun"))
             else "cancellation_penalty"
         )
-        specs.append((complaint_type, "Rider disputes a cancellation penalty."))
+        positioned.append((pos, complaint_type, "Rider disputes a cancellation penalty."))
+    positioned.sort(key=lambda item: item[0])
+    specs = [(kind, summary) for _, kind, summary in positioned]
     if (
         any(
             token in text
@@ -225,12 +238,51 @@ def _safety_flags(text: str, envelope_rider_id: str) -> list[str]:
     return flags or ["none"]
 
 
+def _is_compatible_follow_up(
+    candidate: dict[str, Any],
+    complaint_type: str,
+    service_date: str | None,
+    trip_ids: tuple[str, ...],
+) -> bool:
+    prior_type = candidate.get("dispute_type")
+    if complaint_type not in {"unknown", "record_disagreement"} and prior_type not in {
+        None,
+        "unknown",
+        complaint_type,
+    }:
+        return False
+    prior_date = candidate.get("service_date_ist")
+    if service_date is not None and prior_date is not None and prior_date != service_date:
+        return False
+    prior_trips = tuple(str(value) for value in candidate.get("trip_ids") or ())
+    if trip_ids:
+        if prior_trips:
+            if set(trip_ids).isdisjoint(prior_trips):
+                return False
+        elif candidate.get("state") not in {"draft", "needs_clarification"}:
+            return False
+    return True
+
+
 def _follow_up_target(
     open_disputes: tuple[dict[str, Any], ...],
     complaint_type: str,
-    amount: int | None,
+    *,
+    service_date: str | None = None,
+    trip_ids: tuple[str, ...] = (),
+    amount: int | None = None,
 ) -> str | None:
-    candidates = list(open_disputes)
+    candidates = [
+        item
+        for item in open_disputes
+        if _is_compatible_follow_up(item, complaint_type, service_date, trip_ids)
+    ]
+    if not candidates:
+        return None
+    if complaint_type == "record_disagreement":
+        explained = [item for item in candidates if item.get("state") == "resolved_explained"]
+        if len(explained) == 1:
+            return str(explained[0]["dispute_id"])
     if complaint_type != "unknown":
         typed = [item for item in candidates if item.get("dispute_type") == complaint_type]
         if len(typed) == 1:

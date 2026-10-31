@@ -63,7 +63,11 @@ def plan_decision(
             None,
             ("outside_policy_window",),
         )
-    if evaluation.source_ambiguous and evaluation.evidence_complete:
+    if (
+        evaluation.source_ambiguous
+        and evaluation.evidence_complete
+        and "conflicting_source_rows" in evaluation.reason_codes
+    ):
         return DecisionPlan(
             "escalate",
             "create_escalation",
@@ -91,6 +95,18 @@ def plan_decision(
             evaluation.reason_codes,
             escalation_category=category,
             escalation_reason=reason,
+        )
+    if evaluation.source_ambiguous and evaluation.evidence_complete:
+        return DecisionPlan(
+            "escalate",
+            "create_escalation",
+            None,
+            ("source_data_ambiguous",) + tuple(evaluation.reason_codes),
+            escalation_category="data_quality",
+            escalation_reason=(
+                "Source rows for this evidence are conflicting or were rejected at import; "
+                "no single safe interpretation exists."
+            ),
         )
     if not evaluation.evidence_complete or evaluation.verified_shortfall is None:
         return DecisionPlan(

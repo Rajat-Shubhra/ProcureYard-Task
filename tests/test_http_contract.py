@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from app.application import create_app
@@ -397,6 +397,23 @@ def test_unexpected_exception_returns_retryable_503_with_trace_header(
     error = assert_envelope(response, status=503, code="internal_error", retryable=True)
     assert error["trace_id"] == "trace-from-vendor-1"
     assert "secret internal detail" not in response.text
+
+
+@pytest.mark.parametrize("raised_status", [500, 502, 503])
+def test_server_http_exception_normalises_to_retryable_503_internal_error(
+    client: TestClient, raised_status: int
+) -> None:
+    def http_boom() -> dict[str, object]:
+        raise HTTPException(status_code=raised_status, detail="internal http detail")
+
+    route_path = f"/__http_boom_{raised_status}"
+    fastapi_app(client).add_api_route(route_path, http_boom, methods=["GET"])
+
+    response = client.get(route_path, headers={TRACE_HEADER: f"trace-http-{raised_status}"})
+
+    error = assert_envelope(response, status=503, code="internal_error", retryable=True)
+    assert error["trace_id"] == f"trace-http-{raised_status}"
+    assert "internal http detail" not in response.text
 
 
 def test_retryable_processing_error_returns_resume_envelope(client: TestClient) -> None:

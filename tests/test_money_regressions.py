@@ -482,3 +482,315 @@ def test_prior_auto_payment_known_only_to_payswift_forces_approval(stack) -> Non
     state = money(database)
     assert state["intents"] == [] and state["pending_approvals"] == [150], state
     assert "approval" in reply
+
+
+# --- PR #1 review regressions (lock ordering, follow-up date grouping, escalation reasons, ₹None)
+
+
+def test_ops_approve_reject_and_retry_payout_acquire_rider_lock_before_ops_row(
+    stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database, service, ops, _ = stack
+    events: list[str] = []
+
+    from sqlalchemy import event
+
+    import app.ops.service as ops_module
+
+    real_lock_rider = ops_module.lock_rider
+
+    def traced_lock_rider(session: Any, rider_id: str) -> None:
+        events.append(f"lock_rider:{rider_id}")
+        real_lock_rider(session, rider_id)
+
+    @event.listens_for(database.engine, "before_cursor_execute")
+    def record_sql(_conn: Any, _cursor: Any, statement: str, _params: Any, *_rest: Any) -> None:
+        normalized = " ".join(statement.split()).upper()
+        if "FROM OPS_ITEMS" in normalized:
+            events.append("select_ops_item")
+
+    monkeypatch.setattr(ops_module, "lock_rider", traced_lock_rider)
+
+    # 1. Approve path
+    service.process(
+        envelope(
+            "w_lock_1",
+            "R016",
+            "19 sept ke 5 orders ka paisa hi nahi aaya!! jaldi karo",
+            "2026-09-22T11:30:00+05:30",
+        )
+    )
+    with database.session() as session:
+        approval_item = session.scalar(
+            select(OpsItem).where(OpsItem.rider_id == "R016", OpsItem.status == "pending")
+        )
+        assert approval_item is not None
+        approval_id = approval_item.item_id
+
+    events.clear()
+    assert ops.approve(approval_id, "ops-user", None).status == "approved"
+    # Pre-fetch runs outside write tx; inside write tx lock_rider precedes ops_items.
+    lock_idx = events.index("lock_rider:R016")
+    assert "select_ops_item" in events[lock_idx + 1 :], events
+
+    # 2. Reject path
+    service.process(
+        envelope(
+            "w_lock_2",
+            "R034",
+            "Sep 19 ko 3 orders ka paisa missing hai payout mein",
+            "2026-09-23T11:30:00+05:30",
+        )
+    )
+    with database.session() as session:
+        reject_item = session.scalar(
+            select(OpsItem).where(OpsItem.rider_id == "R034", OpsItem.status == "pending")
+        )
+        assert reject_item is not None
+        reject_id = reject_item.item_id
+
+    events.clear()
+    assert ops.reject(reject_id, "ops-user", "declined").status == "rejected"
+    lock_idx = events.index("lock_rider:R034")
+    assert "select_ops_item" in events[lock_idx + 1 :], events
+
+    # 3. Retry-payout path on a provider-failure escalation
+    with database.session() as session, session.begin():
+        intent = session.scalar(select(PayoutIntent).where(PayoutIntent.rider_id == "R016"))
+        assert intent is not None
+        intent.status = "failed"
+        retry_esc = OpsItem(
+            item_id="ops_provider_fail_1",
+            logical_key=f"provider-failure:{intent.intent_id}",
+            rider_id="R016",
+            dispute_id=intent.dispute_id,
+            decision_id=intent.decision_id,
+            item_type="escalation",
+            amount=None,
+            reason="PaySwift timeout exhausted",
+            status="pending",
+        )
+        session.add(retry_esc)
+
+    events.clear()
+    assert ops.retry_payout("ops_provider_fail_1", "ops-user", "retry").status == "requeued"
+    lock_idx = events.index("lock_rider:R016")
+    assert "select_ops_item" in events[lock_idx + 1 :], events
+
+
+def test_new_date_surge_claim_opens_a_separate_dispute_instead_of_attaching_to_prior_date(
+    stack,
+) -> None:
+    database, service, _, ledger = stack
+    first = service.process(
+        envelope("w1", "R035", "20 ko surge nahi mila", "2026-09-22T11:00:00+05:30")
+    )
+    assert "₹37" in first.reply
+    confirm_in_payswift(database, ledger, payout_id="po_sep20")
+
+    second = service.process(
+        envelope("w2", "R035", "21 ko surge nahi mila", "2026-09-23T11:45:00+05:30")
+    )
+    assert "₹25" in second.reply
+    state = money(database)
+    assert sorted(state["intents"]) == [(25, "queued"), (37, "confirmed")], state
+    with database.session() as session:
+        disputes = list(
+            session.scalars(select(Dispute).order_by(Dispute.service_date_ist))
+        )
+    assert [d.service_date_ist for d in disputes] == [date(2026, 9, 20), date(2026, 9, 21)]
+
+
+def test_new_trip_claim_without_date_opens_separate_dispute_from_prior_date(stack) -> None:
+    database, service, _, ledger = stack
+    first = service.process(
+        envelope(
+            "w1",
+            "R035",
+            "order T176205 ka surge nahi mila",
+            "2026-09-22T11:00:00+05:30",
+        )
+    )
+    assert "₹37" in first.reply
+    confirm_in_payswift(database, ledger, payout_id="po_t176205")
+
+    second = service.process(
+        envelope(
+            "w2",
+            "R035",
+            "order T980582 ka surge nahi mila",
+            "2026-09-23T11:45:00+05:30",
+        )
+    )
+    assert "₹25" in second.reply
+    with database.session() as session:
+        disputes = list(
+            session.scalars(select(Dispute).order_by(Dispute.service_date_ist))
+        )
+    assert [d.service_date_ist for d in disputes] == [date(2026, 9, 20), date(2026, 9, 21)]
+
+
+def test_service_rejects_conflicting_follow_up_target_even_from_model_payload(
+    source_database: Path, tmp_path: Path
+) -> None:
+    from app.agent.contracts import InterpretationResult, ModelInterpretation
+
+    database_path = tmp_path / "forced_link.db"
+    shutil.copyfile(source_database, database_path)
+    database = Database(f"sqlite+pysqlite:///{database_path}")
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        llm_provider="fake",
+        database_url=str(database.engine.url),
+    )
+    ledger = FakeLedger()
+    heuristic = HeuristicInterpretationProvider()
+
+    class MislinkingProvider:
+        def interpret(self, context: Any) -> InterpretationResult:
+            if not context.open_disputes:
+                return heuristic.interpret(context)
+            wrong_target = context.open_disputes[0]["dispute_id"]
+            payload = {
+                "schema_version": "2.0.0",
+                "language": "hinglish",
+                "message_intent": "follow_up",
+                "requested_status": "not_applicable",
+                "safety_flags": ["none"],
+                "complaints": [
+                    {
+                        "complaint_index": 0,
+                        "complaint_type": "surge",
+                        "summary": "21 Sep surge claim wrongly linked to 20 Sep dispute.",
+                        "service_date_ist": "2026-09-21",
+                        "trip_ids": ["T980582"],
+                        "alleged_amount_rupees": None,
+                        "grounding": {"status": "grounded", "missing_fields": []},
+                        "relation": {
+                            "kind": "follow_up",
+                            "target_dispute_id": wrong_target,
+                            "contradicts_prior": False,
+                        },
+                        "proposed_group": {
+                            "policy_cause": "surge",
+                            "service_date_ist": "2026-09-21",
+                            "message_context": "current_message",
+                        },
+                        "confidence": 0.9,
+                    }
+                ],
+            }
+            return InterpretationResult(
+                interpretation=ModelInterpretation.from_payload(payload),
+                provider="test",
+                model="test",
+                prompt_version="strict-rules-v2",
+                attempt_count=1,
+            )
+
+    try:
+        service = ConversationService(
+            database,
+            settings,
+            interpretation_provider=MislinkingProvider(),
+            payswift_client=ledger,  # type: ignore[arg-type]
+        )
+        service.process(
+            envelope("w1", "R035", "20 ko surge nahi mila", "2026-09-22T11:00:00+05:30")
+        )
+        confirm_in_payswift(database, ledger, payout_id="po_1")
+        second = service.process(
+            envelope(
+                "w2",
+                "R035",
+                "21 ko order T980582 ka surge nahi mila",
+                "2026-09-23T11:45:00+05:30",
+            )
+        )
+        assert "₹25" in second.reply
+        with database.session() as session:
+            disputes = list(
+                session.scalars(select(Dispute).order_by(Dispute.service_date_ist))
+            )
+        assert [d.service_date_ist for d in disputes] == [date(2026, 9, 20), date(2026, 9, 21)]
+    finally:
+        database.dispose()
+
+
+def test_policy_exception_and_distance_escalations_record_specific_reasons_not_source_conflict(
+    stack,
+) -> None:
+    database, service, _, _ = stack
+    r028_reply = service.process(
+        envelope(
+            "w_r028",
+            "R028",
+            "accident hua tha isliye order T849302 cancel kiya, "
+            "penalty kyun kaata? bahut problem hai",
+            "2026-09-23T12:15:00+05:30",
+        )
+    ).reply
+    r036_reply = service.process(
+        envelope(
+            "w_r036",
+            "R036",
+            "18 ko order T990831 ka distance galat laga hai",
+            "2026-09-23T12:00:00+05:30",
+        )
+    ).reply
+
+    with database.session() as session:
+        r028_item = session.scalar(select(OpsItem).where(OpsItem.rider_id == "R028"))
+        r036_item = session.scalar(select(OpsItem).where(OpsItem.rider_id == "R036"))
+        assert r028_item is not None and r036_item is not None
+        assert "policy exception" in r028_item.reason.lower()
+        assert "conflicting" not in r028_item.reason.lower()
+        assert "distance" in r036_item.reason.lower()
+        assert "conflicting" not in r036_item.reason.lower()
+
+    assert "exception" in r028_reply.lower() and "conflict" not in r028_reply.lower()
+    assert "distance" in r036_reply.lower() and "conflict" not in r036_reply.lower()
+
+    # True source conflicts still take the data_quality escalation path.
+    conflict_eval = replace(
+        _evaluation(0),
+        complaint_type="policy_exception",
+        verified_shortfall=None,
+        source_ambiguous=True,
+        reason_codes=("conflicting_source_rows",),
+    )
+    conflict_plan = plan_decision(conflict_eval, prior_auto_payment_today=False)
+    assert conflict_plan.outcome == "escalate"
+    assert conflict_plan.escalation_category == "data_quality"
+
+
+def test_rejected_escalation_status_and_resend_never_render_rupee_none(stack) -> None:
+    database, service, ops, _ = stack
+    claim = (
+        "accident hua tha isliye order T849302 cancel kiya, "
+        "penalty kyun kaata? bahut problem hai"
+    )
+    service.process(envelope("w1", "R028", claim, "2026-09-23T12:15:00+05:30"))
+    with database.session() as session:
+        item = session.scalar(select(OpsItem).where(OpsItem.rider_id == "R028"))
+        assert item is not None and item.item_type == "escalation" and item.amount is None
+        item_id = item.item_id
+
+    ops.reject(item_id, "ops-user", "policy penalty stands")
+
+    status_reply = service.process(
+        envelope("w2", "R028", "status kya hai? kab tak aayega?", "2026-09-23T13:00:00+05:30")
+    ).reply
+    resend_reply = service.process(
+        envelope("w3", "R028", claim, "2026-09-23T13:05:00+05:30")
+    ).reply
+
+    for reply in (status_reply, resend_reply):
+        assert "None" not in reply, reply
+        assert "₹None" not in reply, reply
+        assert "policy penalty stands" in reply, reply
+
+    state = money(database)
+    assert state["intents"] == []
+    assert [op for op in state["ops"] if op[2] == "pending"] == []

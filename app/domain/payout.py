@@ -143,10 +143,12 @@ class PayoutPolicyEngine:
                 verified_shortfall=None,
                 completed_trip_count=None,
                 evidence_complete=ownership == "verified" and bool(trips),
-                source_ambiguous=True,
+                source_ambiguous=False,
                 reason_codes=(
                     "policy_exception_requested"
                     if complaint_type == "policy_exception"
+                    else "distance_disputed"
+                    if complaint_type == "distance"
                     else "record_disagreement",
                 ),
                 data_quality_flags=_quality_flags(trips) + extra_flags,

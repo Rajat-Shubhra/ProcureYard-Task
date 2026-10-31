@@ -46,6 +46,7 @@ from app.models import (
     Evidence,
     Message,
     MessageInterpretation,
+    NormalizedTrip,
     OpsItem,
     PayoutIntent,
     Rider,
@@ -358,15 +359,13 @@ class ConversationService:
                     .order_by(Decision.decision_version.desc())
                     .limit(1)
                 )
+                effective_date, trip_ids = _dispute_evidence_summary(session, dispute, latest)
                 dispute_context.append(
                     {
                         "dispute_id": dispute.dispute_id,
                         "dispute_type": dispute.dispute_type,
-                        "service_date_ist": (
-                            dispute.service_date_ist.isoformat()
-                            if dispute.service_date_ist
-                            else None
-                        ),
+                        "service_date_ist": effective_date,
+                        "trip_ids": list(trip_ids),
                         "state": dispute.state,
                         "amount": latest.amount if latest else None,
                     }
@@ -620,9 +619,19 @@ class ConversationService:
                     dispute = session.get(Dispute, target)
                     if dispute is not None and dispute.rider_id != envelope.rider_id:
                         dispute = None
+                    if dispute is not None and not _can_attach_follow_up(
+                        session, envelope.rider_id, dispute, extracted
+                    ):
+                        dispute = None
                 if dispute is None:
+                    effective_date = extracted.service_date_ist or _owned_trip_service_date(
+                        session, envelope.rider_id, extracted.trip_ids
+                    )
                     grouping_key = _grouping_key_for(
-                        envelope.rider_id, extracted.service_date_ist, extracted.complaint_type
+                        envelope.rider_id,
+                        effective_date,
+                        extracted.complaint_type,
+                        extracted.trip_ids,
                     )
                     dispute = group_to_dispute.get(grouping_key) or session.scalar(
                         select(Dispute)
@@ -641,7 +650,7 @@ class ConversationService:
                         rider_id=envelope.rider_id,
                         state="verifying" if is_accepted else "needs_clarification",
                         dispute_type=extracted.complaint_type,
-                        service_date_ist=extracted.service_date_ist,
+                        service_date_ist=effective_date,
                         policy_cause=extracted.complaint_type,
                         grouping_key=grouping_key,
                     )
@@ -758,6 +767,15 @@ class ConversationService:
             trip_ids=trip_ids,
             received_at=envelope.received_at,
         )
+        if (
+            dispute.service_date_ist is None
+            and evaluation.ownership == "verified"
+            and evaluation.service_date_ist is not None
+        ):
+            dispute.service_date_ist = evaluation.service_date_ist
+            dispute.grouping_key = _grouping_key_for(
+                envelope.rider_id, dispute.service_date_ist, dispute.dispute_type
+            )
         prior_auto = self._prior_auto_payment(
             session, envelope.rider_id, envelope.received_at, ledger
         )
@@ -999,16 +1017,27 @@ class ConversationService:
             and commitments.committed_amount > 0
             and commitments.committed_amount >= (evaluation.verified_shortfall or 0)
         )
-        rejected = commitments.rejected_item
+        rejected = (
+            commitments.rejected_item
+            if commitments.rejected_item is not None
+            and (commitments.rejected_item.item_type == "approval" or not new_evidence)
+            else None
+        )
         if not ((same_dispute and not new_evidence) or fully_covered or rejected):
             return None
         if rejected is not None and not (same_dispute or fully_covered):
-            note = (
-                f"₹{rejected.amount} ka claim ops team ne review karke decline kiya tha"
-                + (f": {rejected.reviewer_note}" if rejected.reviewer_note else ".")
-            )
+            suffix = f": {rejected.reviewer_note}" if rejected.reviewer_note else "."
+            if rejected.item_type == "approval" and rejected.amount is not None:
+                note = (
+                    f"₹{rejected.amount} ka claim ops team ne review karke decline kiya tha"
+                    f"{suffix}"
+                )
+                rejected_amount: int | None = rejected.amount
+            else:
+                note = f"Aapka case ops team ne review karke close kiya tha{suffix}"
+                rejected_amount = None
             plan = DecisionPlan(
-                "report_status", "reply_only", rejected.amount, ("ops_rejected",)
+                "report_status", "reply_only", rejected_amount, ("ops_rejected",)
             )
             outcome = Outcome(complaint_ids, dispute.dispute_id, plan, evaluation, "succeeded")
             outcome.status_note = note
@@ -1202,7 +1231,7 @@ class ConversationService:
         elif intent is not None and intent.status != "failed":
             lines.append(f"₹{intent.amount} payout processing mein hai.")
             statuses.add("processing")
-        if pending is not None and pending.item_type == "approval":
+        if pending is not None and pending.item_type == "approval" and pending.amount is not None:
             lines.append(f"₹{pending.amount} ops approval mein hai.")
             statuses.add("awaiting_approval")
         elif pending is not None:
@@ -1217,9 +1246,12 @@ class ConversationService:
             )
             if resolved is not None and resolved.status == "rejected":
                 note = f": {resolved.reviewer_note}" if resolved.reviewer_note else "."
-                lines.append(
-                    f"₹{resolved.amount} ka claim ops team ne review karke decline kiya{note}"
-                )
+                if resolved.item_type == "approval" and resolved.amount is not None:
+                    lines.append(
+                        f"₹{resolved.amount} ka claim ops team ne review karke decline kiya{note}"
+                    )
+                else:
+                    lines.append(f"Aapka case ops team ne review karke close kiya{note}")
             else:
                 lines.append("Abhi koi pending payment ya approval nahi mila.")
         status = next(iter(statuses)) if len(statuses) == 1 else "mixed" if statuses else "none"
@@ -1326,8 +1358,18 @@ def _complaint_id(message_id: str, index: int) -> str:
     return f"cmp_{digest}"
 
 
-def _grouping_key_for(rider_id: str, service_date: Any, complaint_type: str) -> str:
-    date_token = service_date.isoformat() if service_date else "unknown"
+def _grouping_key_for(
+    rider_id: str,
+    service_date: Any,
+    complaint_type: str,
+    trip_ids: tuple[str, ...] | list[str] = (),
+) -> str:
+    if service_date:
+        date_token = service_date.isoformat()
+    elif trip_ids:
+        date_token = "trips:" + ",".join(sorted(set(trip_ids)))
+    else:
+        date_token = "unknown"
     return "|".join((rider_id, date_token, complaint_type))
 
 
@@ -1340,8 +1382,86 @@ def _grouping_key(envelope: MessageEnvelope, complaint: ExtractedComplaint) -> s
     if complaint.target_dispute_id:
         return f"follow-up:{complaint.target_dispute_id}"
     return _grouping_key_for(
-        envelope.rider_id, complaint.service_date_ist, complaint.complaint_type
+        envelope.rider_id,
+        complaint.service_date_ist,
+        complaint.complaint_type,
+        complaint.trip_ids,
     )
+
+
+def _owned_trip_service_date(
+    session: Session, rider_id: str, trip_ids: tuple[str, ...]
+) -> Any:
+    if not trip_ids:
+        return None
+    dates = set(
+        session.scalars(
+            select(NormalizedTrip.service_date_ist).where(
+                NormalizedTrip.rider_id == rider_id,
+                NormalizedTrip.trip_id.in_(trip_ids),
+            )
+        )
+    )
+    return next(iter(dates)) if len(dates) == 1 else None
+
+
+def _dispute_evidence_summary(
+    session: Session, dispute: Dispute, latest: Decision | None
+) -> tuple[str | None, tuple[str, ...]]:
+    effective_date = dispute.service_date_ist.isoformat() if dispute.service_date_ist else None
+    trip_ids: list[str] = []
+    if latest is not None:
+        for evidence_id in latest.evidence_ids or []:
+            evidence = session.get(Evidence, evidence_id)
+            if evidence is not None and isinstance(evidence.payload, dict):
+                for trip_id in evidence.payload.get("trip_ids") or []:
+                    if str(trip_id) not in trip_ids:
+                        trip_ids.append(str(trip_id))
+                if effective_date is None and evidence.payload.get("service_date_ist"):
+                    effective_date = str(evidence.payload["service_date_ist"])
+                break
+    for complaint_trips in session.scalars(
+        select(Complaint.trip_ids).where(Complaint.dispute_id == dispute.dispute_id)
+    ):
+        for trip_id in complaint_trips or []:
+            if str(trip_id) not in trip_ids:
+                trip_ids.append(str(trip_id))
+    return effective_date, tuple(trip_ids)
+
+
+def _can_attach_follow_up(
+    session: Session,
+    rider_id: str,
+    dispute: Dispute,
+    extracted: ExtractedComplaint,
+) -> bool:
+    if extracted.complaint_type not in {"unknown", "record_disagreement"} and (
+        dispute.dispute_type not in {"unknown", extracted.complaint_type}
+    ):
+        return False
+    latest = session.scalar(
+        select(Decision)
+        .where(Decision.dispute_id == dispute.dispute_id)
+        .order_by(Decision.decision_version.desc())
+        .limit(1)
+    )
+    prior_date_str, prior_trips = _dispute_evidence_summary(session, dispute, latest)
+    complaint_date = extracted.service_date_ist or _owned_trip_service_date(
+        session, rider_id, extracted.trip_ids
+    )
+    if (
+        complaint_date is not None
+        and prior_date_str is not None
+        and complaint_date.isoformat() != prior_date_str
+    ):
+        return False
+    if extracted.trip_ids:
+        if prior_trips:
+            if set(extracted.trip_ids).isdisjoint(prior_trips):
+                return False
+        elif dispute.state not in {"draft", "needs_clarification"}:
+            return False
+    return True
 
 
 def _escalation_line(plan: DecisionPlan, evaluation: DisputeEvaluation) -> str:

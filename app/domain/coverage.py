@@ -156,6 +156,8 @@ def summarize_commitments(
             evidence, complaint_type, service_date_ist, current_trips, is_incentive
         )
         if item.item_type != "approval" or item.amount is None:
+            if same_dispute and item.status == "rejected" and summary.rejected_item is None:
+                summary.rejected_item = item
             continue
         if item.status == "rejected":
             if overlapping and summary.rejected_item is None:

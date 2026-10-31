@@ -137,9 +137,9 @@ def install_error_handlers(app: FastAPI) -> None:
             else HTTP_STATUS_CODES.get(exc.status_code, DEFAULT_HTTP_CODE)
         )
         return error_response(
-            status_code=exc.status_code,
+            status_code=503 if server_side else exc.status_code,
             code=code,
-            message=str(exc.detail),
+            message=UNEXPECTED_ERROR_MESSAGE if server_side else str(exc.detail),
             retryable=server_side,
             trace_id=_trace_id(request),
             headers=exc.headers,
